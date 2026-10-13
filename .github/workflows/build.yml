@@ -1,0 +1,60 @@
+name: Build and test Windows
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Rust toolchain
+        shell: pwsh
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup component add rustfmt
+      - name: Import initial source archive
+        if: hashFiles('source-import.zip') != '' && github.event_name != 'pull_request'
+        shell: pwsh
+        run: |
+          $expected = 'C0AF4209C564776387FB0BB39A249CA0688E658C97EF24D6EFDC6A1B66096F05'
+          if ((Get-FileHash source-import.zip -Algorithm SHA256).Hash -ne $expected) { throw 'Source checksum mismatch' }
+          Expand-Archive -LiteralPath source-import.zip -DestinationPath . -Force
+          Remove-Item -LiteralPath source-import.zip
+          cargo fmt --all
+          if ($LASTEXITCODE -ne 0) { throw 'Formatting failed' }
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add --all
+          git commit -m 'Import and format initial Rust sources'
+          git push origin HEAD:main
+      - name: Test
+        shell: pwsh
+        run: ./build.ps1 test
+      - name: Build bundled installer
+        shell: pwsh
+        run: ./build.ps1 release
+      - name: Test installer controls
+        shell: pwsh
+        run: |
+          $report = (& ./target/release/securecrt-bridge.exe --installer-self-test | Out-String) | ConvertFrom-Json
+          if (-not $report.ok) { throw 'Installer self-test failed' }
+          $report | ConvertTo-Json
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          $version = ((Get-Content Cargo.toml -Raw) | Select-String 'version = "([^"]+)"').Matches[0].Groups[1].Value
+          Copy-Item target/release/securecrt-bridge.exe "dist/SecureCRTBridge-$version-Setup.exe"
+          Get-FileHash dist/*.exe -Algorithm SHA256 | Format-Table | Out-File dist/SHA256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SecureCRTBridge-Windows-x64
+          path: dist/
+
