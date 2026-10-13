@@ -1,0 +1,5 @@
+/target/
+/.build/
+/dist/
+*.log
+/PROJECT_STATUS.md
