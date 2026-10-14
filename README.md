@@ -10,18 +10,19 @@
 - **后台多会话**：窗口可最小化；每个标签页有独立 ID，不同标签页可以并行，同一标签页的 AI 写入串行处理。
 - **自动接入**：安装后配置登录钩子；新连接、重新连接时自动接入。本地服务可随 Windows 登录启动。
 - **常规安装界面**：自动查找路径、手动浏览目录、安装／升级／卸载切换、进度条和逐步执行日志。
-- **跨 AI 会话使用**：安装用户级 `securecrt-bridge` skill，其他 Codex 对话可发现安装路径与现有终端。
+- **多 Agent Skill 安装**：自动检测本机客户端，默认勾选已发现的 Agent；可多选、修改目录、添加其他客户端或全部跳过。
 - **可暂停、可恢复**：托盘控制暂停与退出，安装前备份配置，卸载按记录恢复，保留用户后续修改。
 - **自主恢复续行输入**：AI 可对自己结果未知的任务发送 Ctrl+C，读屏确认恢复后继续操作，无需默认让用户按键。
 
 ## 下载与安装
 
-在 [Releases](https://github.com/LinHuiG/securecrt-bridge/releases) 下载 `SecureCRTBridge-0.1.6-Setup.exe`。
+在 [Releases](https://github.com/LinHuiG/securecrt-bridge/releases) 下载 `SecureCRTBridge-0.1.7-Setup.exe`。
 
 1. 关闭 SecureCRT。
 2. 双击安装包，确认 **SecureCRT 安装目录** 和 **配置目录**。找不到时使用“浏览…”；配置目录应包含 `Sessions/Default.ini`。
-3. 点击“开始安装 / 升级”，等待进度到 100%。
-4. 像平常一样从堡垒机连接 SSH，或打开 SecureCRT 会话。
+3. 确认 **安装 AI Skill** 下的客户端复选框。检测到的客户端默认勾选；“其他客户端 / 添加目录…”可选择额外的 `skills` 目录。也可取消全部或关闭总开关。
+4. 点击“开始安装 / 升级”，等待进度到 100%。
+5. 像平常一样从堡垒机连接 SSH，或打开 SecureCRT 会话。
 
 要求：**Windows x64、SecureCRT x64**。已在 SecureCRT 9.7.1 上验证。产品由 Rust 编译，安装 EXE 内置接入 DLL，无需另装 Python、Node 或 Rust。SecureCRT 本身不包含在安装包中。
 
@@ -64,7 +65,25 @@ GUI 子系统 EXE 在 PowerShell 中建议接 `| Out-String`，确保等待结�
 
 ### AI 客户端与审批
 
-当前安装器将 skill 安装到 `CODEX_HOME/skills/securecrt-bridge`，未设置时使用 `%USERPROFILE%/.codex/skills/securecrt-bridge`。即使未安装 Codex，也会创建此目录；当前界面没有其他客户端的 skill 路径选择项。其他客户端可调用通用 CLI/HTTP，skill 的位置与格式需要按客户端约定配置。
+安装器检查当前用户的配置目录、指定环境变量和 PATH 中的客户端入口；仅做路径探测，不启动 Agent、不读取登录凭据。检测到的客户端默认勾选，历史安装目录也会保留在列表中。未检测到的客户端不默认创建目录，但可以手动勾选。
+
+| 客户端 | 默认 Skill 文件 |
+|---|---|
+| Codex | `$CODEX_HOME/skills/securecrt-bridge/SKILL.md`，未设置时 `~/.codex/skills/securecrt-bridge/SKILL.md` |
+| DeepSeek Harness | `$DSH_HOME/skills/securecrt-bridge/SKILL.md`，未设置时 `~/.dsh/skills/securecrt-bridge/SKILL.md` |
+| Claude Code | `$CLAUDE_CONFIG_DIR/skills/securecrt-bridge/SKILL.md`，未设置时 `~/.claude/skills/securecrt-bridge/SKILL.md` |
+| Cursor | `~/.cursor/skills/securecrt-bridge/SKILL.md` |
+| GitHub Copilot | `~/.copilot/skills/securecrt-bridge/SKILL.md` |
+| Gemini CLI | `~/.gemini/skills/securecrt-bridge/SKILL.md` |
+| OpenCode | `$XDG_CONFIG_HOME/opencode/skills/securecrt-bridge/SKILL.md`，未设置时 `~/.config/opencode/skills/securecrt-bridge/SKILL.md` |
+
+`~` 表示当前 Windows 用户目录。列表及安装日志展示完整路径；选中一行后可修改目录。“其他客户端 / 添加目录…”支持多个自定义位置，选择客户端的 `skills` 父目录即可，安装器添加 `securecrt-bridge` 子目录。相同路径去重。
+
+关闭总开关或取消全部勾选会跳过 Skill。升级时，取消选择的旧 Skill 仅在仍与本程序安装内容一致时移除，用户修改会保留并记录。卸载按所有实际安装目录清理，不删除客户端本身或其他 Skill。
+
+不要求所有 Agent 都采用相同配置；自动检测覆盖表中客户端，其他 Agent、项目级安装或自定义加载规则需手动选择路径。各客户端仍需启用本地 Skill 加载并允许本地命令工具，目录安装不代表已验证每个客户端的运行兼容性。参见 [客户端目录依据](docs/AGENT_SKILLS.md)。
+
+命令行安装默认自动选择。`--skills none` 跳过，或重复传入 `--skill-dir C:/Agent/skills/securecrt-bridge` 指定准确的 Skill 子目录。`detect` 的 `skill_clients` 字段返回检测结果。
 
 只读查询可配置持久允许规则；远程写入按具体操作和已有授权范围处理。skill 会复用同一任务内已授权的操作，不要求每次查询都重新确认。宿主沙箱和审批规则仍然生效，具体配置及边界见 [审批配置](docs/APPROVALS.md)。
 

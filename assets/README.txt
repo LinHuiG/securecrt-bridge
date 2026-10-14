@@ -39,5 +39,8 @@ AppData\Local\SecureCRTBridge；不要分享 connection.json。
 显式 /SCRIPT 参数覆盖会话登录钩子，此类启动方式需要另行配置。
 其他线程使用用户级 securecrt-bridge skill 自动发现安装路径和会话。
 skill 不改变 AI 所在沙箱的权限，也不保存远程账号密码。
-当前 skill 默认安装到 CODEX_HOME/skills 或用户 .codex/skills，
-尚未提供其他 AI 客户端的 skill 目录选择。
+安装器默认勾选检测到的 Agent，可多选 Codex、DeepSeek Harness 等客户端。
+可修改目录、添加其他客户端的 skills 目录，也可取消“安装 AI Skill”或全部取消勾选。
+列表及安装日志显示完整的 SKILL.md 路径；同一路径只安装一次。
+升级时取消选择的旧 Skill 仅在未被用户修改时移除。卸载按安装记录处理所有目录。
+命令行可用 --skills none 跳过，或重复 --skill-dir 指定 securecrt-bridge 完整子目录。

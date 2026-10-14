@@ -2,6 +2,7 @@
 mod installer;
 mod installer_ui;
 mod platform;
+mod skills;
 mod tray;
 use anyhow::{bail, Context, Result};
 use scb_core::{http, Discovery, Installation};
@@ -62,7 +63,9 @@ fn run(args: &[String]) -> Result<()> {
         "--installer-self-test" => output(installer_ui::self_test()?),
         "install" | "repair" => output(installer::install(args, command == "repair")?),
         "uninstall" => output(installer::uninstall(args)?),
-        "detect" => output(json!({"ok":true,"candidates":installer::detect()})),
+        "detect" => output(
+            json!({"ok":true,"candidates":installer::detect(),"skill_clients":skills::discover(Installation::load().ok().as_ref())}),
+        ),
         "serve" => serve(!args.iter().any(|a| a == "--no-tray")),
         "start" => {
             start()?;
@@ -178,7 +181,7 @@ fn run(args: &[String]) -> Result<()> {
         }
         "help" | "--help" | "-h" => {
             println!("interrupt SESSION --owner CHAT --job ORIGINAL_REQUEST_ID [--request-id ID] [--async]\nSends Ctrl+C for your unknown job; inspect the fresh screen, then acknowledge.");
-            println!("SecureCRT Bridge {}\ninstall [--path SecureCRT.exe] [--config Config] | repair | uninstall\ndetect | start | stop | doctor | sessions | screen SESSION\nclaim SESSION --owner CHAT | release SESSION --owner CHAT\nexec SESSION --owner CHAT --command TEXT [--timeout 30] [--request-id ID] [--async]\ninput SESSION --owner CHAT --text TEXT | result REQUEST_ID\npause [SESSION] | resume [SESSION]\nCommand text may also be provided by --file UTF8_FILE or --stdin.",scb_core::VERSION);
+            println!("SecureCRT Bridge {}\ninstall [--path SecureCRT.exe] [--config Config] [--skills auto|none] [--skill-dir ABSOLUTE_DIR ...] | repair | uninstall\ndetect | start | stop | doctor | sessions | screen SESSION\nclaim SESSION --owner CHAT | release SESSION --owner CHAT\nexec SESSION --owner CHAT --command TEXT [--timeout 30] [--request-id ID] [--async]\ninput SESSION --owner CHAT --text TEXT | result REQUEST_ID\npause [SESSION] | resume [SESSION]\nCommand text may also be provided by --file UTF8_FILE or --stdin.",scb_core::VERSION);
             Ok(())
         }
         _ => bail!("Unknown command; use --help"),

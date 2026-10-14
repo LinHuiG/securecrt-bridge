@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.7
+
+- 安装器新增“安装 AI Skill”总开关和客户端多选列表；默认勾选已检测到的本机 Agent。
+- 支持 Codex、DeepSeek Harness、Claude Code、Cursor、GitHub Copilot、Gemini CLI 和 OpenCode 的路径检测，以及多个自定义目录。
+- 可修改目标目录，显示完整 SKILL.md 路径；支持全部跳过、路径去重和 CLI 的 `--skills none` / 重复 `--skill-dir`。
+- 安装记录兼容旧版单目录，升级和卸载处理多目录 Skill；保留用户修改过的文件。
+- 博客架构和轮询流程图改为 SVG，取消这篇文章对浏览器 Mermaid 渲染的依赖。
+
 ## 0.1.6
 
 - 新增 `interrupt SESSION --owner CHAT --job REQUEST_ID`：原任务所属对话可向结果未知的会话发送一次 Ctrl+C，解决忙碌锁同时拦住恢复输入的问题。

@@ -90,9 +90,22 @@ pub struct Installation {
     pub securecrt_exe: PathBuf,
     pub launcher: PathBuf,
     pub config_dir: PathBuf,
+    #[serde(default)]
     pub skill_dir: PathBuf,
+    /// None means a legacy single-directory installation; Some([]) means skipped.
+    #[serde(default)]
+    pub skill_dirs: Option<Vec<PathBuf>>,
 }
 impl Installation {
+    pub fn skill_paths(&self) -> Vec<PathBuf> {
+        self.skill_dirs.clone().unwrap_or_else(|| {
+            if self.skill_dir.as_os_str().is_empty() {
+                vec![]
+            } else {
+                vec![self.skill_dir.clone()]
+            }
+        })
+    }
     pub fn load() -> Result<Self> {
         load_json(&data_dir().join("installation.json"))
     }

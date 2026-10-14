@@ -1,4 +1,4 @@
-use crate::{option, platform};
+use crate::{option, platform, skills};
 use anyhow::{bail, Context, Result};
 use scb_core::{
     config::{self, Change},
@@ -37,6 +37,8 @@ struct Journal {
     registry: Vec<RegChange>,
     files: BTreeMap<PathBuf, String>,
     skipped: Vec<String>,
+    #[serde(default)]
+    skill_dirs: Vec<PathBuf>,
 }
 #[derive(Serialize, Deserialize)]
 struct RegChange {
@@ -58,14 +60,6 @@ fn same_path(a: &Path, b: &Path) -> bool {
             _ => return false,
         }
     }
-}
-fn default_skill() -> PathBuf {
-    std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default()).join(".codex")
-        })
-        .join("skills/securecrt-bridge")
 }
 pub fn candidate(path: &Path) -> Option<Candidate> {
     let p = if path.is_dir() {
@@ -254,11 +248,19 @@ fn save(j: &Journal) -> Result<()> {
     scb_core::save_json(&journal_path(), j)
 }
 fn write_owned(j: &mut Journal, path: &Path, bytes: &[u8]) -> Result<()> {
+    write_owned_with(j, path, bytes, &save)
+}
+fn write_owned_with(
+    j: &mut Journal,
+    path: &Path,
+    bytes: &[u8],
+    persist: &dyn Fn(&Journal) -> Result<()>,
+) -> Result<()> {
     if path.exists() {
         let old = std::fs::read(path)?;
         if old == bytes {
             j.files.insert(path.into(), hash(bytes));
-            return save(j);
+            return persist(j);
         }
         if j.files.get(path) != Some(&hash(&old)) {
             bail!(
@@ -269,7 +271,90 @@ fn write_owned(j: &mut Journal, path: &Path, bytes: &[u8]) -> Result<()> {
     }
     scb_core::atomic_write(path, bytes)?;
     j.files.insert(path.into(), hash(bytes));
-    save(j)
+    persist(j)
+}
+fn skill_preflight(j: &Journal, paths: &mut [PathBuf]) -> Result<()> {
+    for dir in paths {
+        // Reuse the journal spelling on Windows before comparing owned hashes.
+        if let Some(path) = j
+            .files
+            .keys()
+            .find(|p| skills::path_eq(p, &dir.join("SKILL.md")))
+        {
+            *dir = path
+                .parent()
+                .context("Invalid skill journal path")?
+                .to_path_buf();
+        }
+        let path = dir.join("SKILL.md");
+        if path.exists() {
+            let bytes = std::fs::read(&path)?;
+            if bytes != SKILL.as_bytes() && j.files.get(&path) != Some(&hash(&bytes)) {
+                bail!(
+                    "Skill 文件已有用户内容，请取消该客户端或选择其他目录：{}",
+                    path.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+fn sync_skills(
+    j: &mut Journal,
+    previous: &[PathBuf],
+    selected: &[PathBuf],
+    persist: &dyn Fn(&Journal) -> Result<()>,
+    progress: &dyn Fn(u32, &str),
+) -> Result<()> {
+    for dir in previous.iter().chain(selected) {
+        if !j.skill_dirs.iter().any(|p| skills::path_eq(p, dir)) {
+            j.skill_dirs.push(dir.clone());
+        }
+    }
+    persist(j)?;
+    for dir in selected {
+        write_owned_with(j, &dir.join("SKILL.md"), SKILL.as_bytes(), persist)?;
+        progress(
+            49,
+            &format!("AI Skill 已安装：{}", dir.join("SKILL.md").display()),
+        );
+    }
+    for dir in j.skill_dirs.clone() {
+        if selected.iter().any(|p| skills::path_eq(p, &dir)) {
+            continue;
+        }
+        let path = dir.join("SKILL.md");
+        if let Some(expected) = j.files.get(&path) {
+            match std::fs::read(&path) {
+                Ok(bytes) if hash(&bytes) == *expected => {
+                    std::fs::remove_file(&path)?;
+                    j.files.remove(&path);
+                    persist(j)?;
+                    let _ = std::fs::remove_dir(&dir);
+                    progress(50, &format!("已移除取消勾选的 Skill：{}", path.display()));
+                }
+                Ok(_) => {
+                    let message = format!("用户修改的 Skill 已保留：{}", path.display());
+                    progress(50, &message);
+                    j.skipped.push(message);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    j.files.remove(&path);
+                    persist(j)?;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+    if selected.is_empty() {
+        progress(52, "已跳过 AI Skill 安装，桥接接口仍可正常使用");
+    } else {
+        progress(
+            52,
+            &format!("AI Skill 安装完成，共 {} 个目录", selected.len()),
+        );
+    }
+    Ok(())
 }
 fn set_reg(j: &mut Journal, key: &str, name: &str, value: &str) -> Result<()> {
     if let Some(old) = j
@@ -408,6 +493,13 @@ pub fn install_with_progress(
     let root = c.launcher.parent().context("Invalid install path")?;
     let mut dir = root.join("SecureCRTBridge");
     let previous_install = Installation::load().ok();
+    let mut skill_dirs = skills::selected(args, previous_install.as_ref())?;
+    let mut j: Journal = if journal_path().exists() {
+        scb_core::load_json(&journal_path())?
+    } else {
+        Journal::default()
+    };
+    skill_preflight(&j, &mut skill_dirs)?;
     if let Some(old) = previous_install.as_ref() {
         if !same_path(&old.install_dir, &dir) || !same_path(&old.config_dir, &c.config) {
             bail!("A different SecureCRT installation or configuration is registered. Uninstall it before changing installation location.");
@@ -442,11 +534,6 @@ pub fn install_with_progress(
         )?;
     }
     progress(20, "旧服务已停止，读取安装记录并保留原配置备份");
-    let mut j: Journal = if journal_path().exists() {
-        scb_core::load_json(&journal_path())?
-    } else {
-        Journal::default()
-    };
     j.skipped.clear();
     std::fs::create_dir_all(&dir)?;
     let install = Installation {
@@ -455,7 +542,8 @@ pub fn install_with_progress(
         securecrt_exe: c.executable,
         launcher: c.launcher,
         config_dir: c.config,
-        skill_dir: default_skill(),
+        skill_dir: skill_dirs.first().cloned().unwrap_or_default(),
+        skill_dirs: Some(skill_dirs.clone()),
     };
     // Save discovery early so repair/uninstall can recover a partial install.
     scb_core::save_json(&scb_core::data_dir().join("installation.json"), &install)?;
@@ -465,11 +553,11 @@ pub fn install_with_progress(
     let bytes = std::fs::read(&exe)?;
     write_owned(&mut j, &dir.join("securecrt-bridge.exe"), &bytes)?;
     progress(43, "本地服务和命令行程序已写入");
-    write_owned(
-        &mut j,
-        &install.skill_dir.join("SKILL.md"),
-        SKILL.as_bytes(),
-    )?;
+    let previous_skills = previous_install
+        .as_ref()
+        .map(Installation::skill_paths)
+        .unwrap_or_default();
+    sync_skills(&mut j, &previous_skills, &skill_dirs, &save, progress)?;
     write_owned(
         &mut j,
         &dir.join("README.txt"),
@@ -485,13 +573,6 @@ pub fn install_with_progress(
         &dir.join("THIRD_PARTY_LICENSES.txt"),
         include_bytes!("../../../assets/THIRD_PARTY_LICENSES.txt"),
     )?;
-    progress(
-        52,
-        &format!(
-            "AI skill 已安装：{}",
-            install.skill_dir.join("SKILL.md").display()
-        ),
-    );
     progress(
         54,
         &format!("程序安装目录：{}", install.install_dir.display()),
@@ -591,7 +672,7 @@ pub fn install_with_progress(
     }
     progress(100, "安装完成，可以打开 SecureCRT 或从齐治连接 SSH");
     if args.is_empty() || args.iter().any(|s| s == "--gui") {
-        platform::message(&format!("安装完成。\n\n现在打开 SecureCRT 或从齐治点击 SSH，即可自动接入。\n托盘菜单可暂停、恢复或退出。\n\n配置已备份，skill 已安装。\n跳过的配置数：{}",j.skipped.len()),false);
+        platform::message(&format!("安装完成。\n\n现在打开 SecureCRT 或从齐治点击 SSH，即可自动接入。\n托盘菜单可暂停、恢复或退出。\n\n配置已备份，Skill 安装目录数：{}。\n保留项：{}",skill_dirs.len(),j.skipped.len()),false);
     }
     Ok(
         json!({"ok":true,"installation":install,"hooked_sessions":j.changes.len(),"skipped":j.skipped}),
@@ -647,7 +728,9 @@ pub fn uninstall_with_progress(args: &[String], progress: &dyn Fn(u32, &str)) ->
     }
     let _ = std::fs::remove_dir(install.install_dir.join("hooks"));
     let _ = std::fs::remove_dir(&install.install_dir);
-    let _ = std::fs::remove_dir(&install.skill_dir);
+    for dir in install.skill_paths().iter().chain(&j.skill_dirs) {
+        let _ = std::fs::remove_dir(dir);
+    }
     let _ = std::fs::remove_file(scb_core::data_dir().join("connection.json"));
     let _ = std::fs::remove_file(scb_core::data_dir().join("installation.json"));
     // Retain the journal/backups for recovery; a subsequent install starts a new journal.
@@ -673,6 +756,67 @@ pub fn uninstall_with_progress(args: &[String], progress: &dyn Fn(u32, &str)) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn multi_skill_install_upgrade_skip_and_preserve_edits() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!("scb-skill-install-{}", scb_core::id()));
+        let codex = root.join("codex/skills/securecrt-bridge");
+        let dsh = root.join("dsh/skills/securecrt-bridge");
+        let custom = root.join("custom/securecrt-bridge");
+        let mut j = Journal::default();
+        let persist = |_: &Journal| Ok(());
+        let progress = |_: u32, _: &str| {};
+        sync_skills(
+            &mut j,
+            &[],
+            &[codex.clone(), dsh.clone()],
+            &persist,
+            &progress,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(codex.join("SKILL.md")).unwrap(),
+            SKILL.as_bytes()
+        );
+        assert_eq!(
+            std::fs::read(dsh.join("SKILL.md")).unwrap(),
+            SKILL.as_bytes()
+        );
+        // Old single-directory journals migrate and a changed file is never overwritten.
+        j.skill_dirs.clear();
+        std::fs::write(dsh.join("SKILL.md"), b"user edit").unwrap();
+        let mut conflicting = vec![dsh.clone()];
+        assert!(skill_preflight(&j, &mut conflicting).is_err());
+        sync_skills(
+            &mut j,
+            &[codex.clone(), dsh.clone()],
+            &[custom.clone()],
+            &persist,
+            &progress,
+        )
+        .unwrap();
+        assert!(!codex.exists());
+        assert_eq!(std::fs::read(dsh.join("SKILL.md")).unwrap(), b"user edit");
+        assert_eq!(j.skipped.len(), 1);
+        assert!(custom.join("SKILL.md").exists());
+        sync_skills(&mut j, &[custom.clone()], &[], &persist, &progress).unwrap();
+        assert!(!custom.exists());
+        assert!(dsh.join("SKILL.md").exists());
+        // Delete only this fixture's known leaf files and empty directories.
+        std::fs::remove_file(dsh.join("SKILL.md")).unwrap();
+        for dir in [
+            dsh,
+            root.join("dsh/skills"),
+            root.join("dsh"),
+            root.join("codex/skills"),
+            root.join("codex"),
+            root.join("custom"),
+            root,
+        ] {
+            std::fs::remove_dir(dir).unwrap();
+        }
+    }
     #[test]
     fn detects_portable_layout() {
         let root = std::env::temp_dir().join(format!("scb-layout-{}", scb_core::id()));

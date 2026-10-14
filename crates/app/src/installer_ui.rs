@@ -1,5 +1,6 @@
 //! Native setup window. UI owns only presentation; all mutations stay in installer.
 use crate::installer::{self, Candidate};
+use crate::skills::{self, Client};
 use anyhow::{Context, Result};
 use scb_core::{w, Installation};
 use serde_json::{json, Value};
@@ -31,6 +32,10 @@ const CONFIG_BROWSE: usize = 106;
 const DETECT: usize = 107;
 const START: usize = 108;
 const CLOSE: usize = 109;
+const SKILLS_ENABLE: usize = 110;
+const SKILLS_LIST: usize = 111;
+const SKILLS_ADD: usize = 112;
+const SKILLS_EDIT: usize = 113;
 enum Event {
     Detected(Vec<Candidate>),
     Step(u32, String),
@@ -52,6 +57,11 @@ struct Ui {
     detect: HWND,
     start: HWND,
     close: HWND,
+    skills_enable: HWND,
+    skills_list: HWND,
+    skills_add: HWND,
+    skills_edit: HWND,
+    clients: Vec<Client>,
     title_font: HFONT,
     font: HFONT,
     tx: Sender<Event>,
@@ -105,6 +115,11 @@ fn state_controls(ui: &Ui) {
     }
     enabled(ui.start, idle && (!ui.remove || ui.installed.is_some()));
     enabled(ui.close, !ui.running);
+    enabled(ui.skills_enable, idle && !ui.remove);
+    let skills_on = idle && !ui.remove && send(ui.skills_enable, BM_GETCHECK, 0, 0).0 == 1;
+    for hwnd in [ui.skills_list, ui.skills_add, ui.skills_edit] {
+        enabled(hwnd, skills_on);
+    }
     set_text(
         ui.start,
         if ui.remove {
@@ -113,6 +128,158 @@ fn state_controls(ui: &Ui) {
             "开始安装 / 升级"
         },
     );
+}
+fn populate_skills(ui: &Ui) {
+    send(ui.skills_list, LVM_DELETEALLITEMS, 0, 0);
+    for (index, client) in ui.clients.iter().enumerate() {
+        let mut name = w(&client.name);
+        let item = LVITEMW {
+            mask: LVIF_TEXT,
+            iItem: index as i32,
+            pszText: windows::core::PWSTR(name.as_mut_ptr()),
+            ..Default::default()
+        };
+        send(
+            ui.skills_list,
+            LVM_INSERTITEMW,
+            0,
+            &item as *const _ as isize,
+        );
+        for (column, value) in [
+            (
+                1,
+                if client.detected {
+                    "已发现 / 已配置".into()
+                } else {
+                    "未检测到".into()
+                },
+            ),
+            (2, client.directory.join("SKILL.md").display().to_string()),
+        ] {
+            let mut value = w(value);
+            let item = LVITEMW {
+                iSubItem: column,
+                pszText: windows::core::PWSTR(value.as_mut_ptr()),
+                ..Default::default()
+            };
+            send(
+                ui.skills_list,
+                LVM_SETITEMTEXTW,
+                index,
+                &item as *const _ as isize,
+            );
+        }
+        let item = LVITEMW {
+            stateMask: LVIS_STATEIMAGEMASK,
+            state: LIST_VIEW_ITEM_STATE_FLAGS(if client.selected { 2 << 12 } else { 1 << 12 }),
+            ..Default::default()
+        };
+        send(
+            ui.skills_list,
+            LVM_SETITEMSTATE,
+            index,
+            &item as *const _ as isize,
+        );
+    }
+}
+fn chosen_skills(ui: &Ui) -> Result<Vec<std::path::PathBuf>> {
+    if send(ui.skills_enable, BM_GETCHECK, 0, 0).0 != 1 {
+        return Ok(vec![]);
+    }
+    skills::normalize(
+        ui.clients
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| {
+                send(
+                    ui.skills_list,
+                    LVM_GETITEMSTATE,
+                    *i,
+                    LVIS_STATEIMAGEMASK.0 as isize,
+                )
+                .0 >> 12
+                    == 2
+            })
+            .map(|(_, c)| c.directory.clone())
+            .collect(),
+    )
+}
+fn browse_skill(add: bool) {
+    let target = UI.with(|c| {
+        c.borrow().as_ref().and_then(|ui| {
+            if ui.running || ui.detecting || ui.remove {
+                return None;
+            }
+            let index = send(
+                ui.skills_list,
+                LVM_GETNEXTITEM,
+                usize::MAX,
+                LVNI_SELECTED as isize,
+            )
+            .0;
+            Some((ui.window, index))
+        })
+    });
+    let Some((window, index)) = target else {
+        return;
+    };
+    if !add && index < 0 {
+        UI.with(|c| {
+            if let Some(ui) = c.borrow().as_ref() {
+                set_text(ui.status, "请先选中要修改目录的客户端行。");
+            }
+        });
+        return;
+    }
+    let selected = choose_folder(
+        window,
+        "选择客户端的 skills 目录（自动添加 securecrt-bridge 子目录）",
+    );
+    UI.with(|c| {
+        if let Some(ui) = c.borrow_mut().as_mut() {
+            match selected {
+                Ok(Some(root)) => {
+                    for (i, client) in ui.clients.iter_mut().enumerate() {
+                        client.selected = send(
+                            ui.skills_list,
+                            LVM_GETITEMSTATE,
+                            i,
+                            LVIS_STATEIMAGEMASK.0 as isize,
+                        )
+                        .0 >> 12
+                            == 2;
+                    }
+                    let directory = Path::new(&root).join(skills::NAME);
+                    if add {
+                        if let Some(client) = ui
+                            .clients
+                            .iter_mut()
+                            .find(|c| skills::path_eq(&c.directory, &directory))
+                        {
+                            client.selected = true;
+                        } else {
+                            ui.clients.push(Client {
+                                name: "其他客户端".into(),
+                                directory: directory.clone(),
+                                detected: true,
+                                selected: true,
+                            });
+                        }
+                    } else if let Some(client) = ui.clients.get_mut(index as usize) {
+                        client.directory = directory.clone();
+                        client.selected = true;
+                    }
+                    populate_skills(ui);
+                    append(
+                        ui,
+                        &format!("Skill 目标路径：{}", directory.join("SKILL.md").display()),
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => append(ui, &format!("选择 Skill 目录失败：{error:#}")),
+            }
+        }
+    });
 }
 fn set_candidate(ui: &Ui, c: &Candidate) {
     set_text(
@@ -262,13 +429,24 @@ fn start() {
             set_text(ui.status, "请先选择 SecureCRT 安装目录和配置目录。");
             return None;
         }
+        let selected = if ui.remove {
+            vec![]
+        } else {
+            match chosen_skills(ui) {
+                Ok(paths) => paths,
+                Err(error) => {
+                    set_text(ui.status, &format!("Skill 目录错误：{error:#}"));
+                    return None;
+                }
+            }
+        };
         ui.running = true;
         ui.steps = 0;
         set_text(ui.log, "");
         send(ui.progress, PBM_SETPOS, 0, 0);
         set_text(ui.percent, "0%");
         state_controls(ui);
-        let args = if ui.remove {
+        let mut args = if ui.remove {
             vec!["uninstall".into(), "--noninteractive".into()]
         } else {
             vec![
@@ -280,6 +458,14 @@ fn start() {
                 "--noninteractive".into(),
             ]
         };
+        if !ui.remove {
+            if selected.is_empty() {
+                args.extend(["--skills".into(), "none".into()]);
+            }
+            for path in selected {
+                args.extend(["--skill-dir".into(), path.display().to_string()]);
+            }
+        }
         Some((ui.tx.clone(), ui.remove, args))
     });
     if let Some((tx, remove, args)) = task {
@@ -339,6 +525,13 @@ unsafe extern "system" fn proc(window: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
                     UNINSTALL => mode(true),
                     PATH_BROWSE => browse(false),
                     CONFIG_BROWSE => browse(true),
+                    SKILLS_ENABLE => UI.with(|c| {
+                        if let Some(ui) = c.borrow().as_ref() {
+                            state_controls(ui);
+                        }
+                    }),
+                    SKILLS_ADD => browse_skill(true),
+                    SKILLS_EDIT => browse_skill(false),
                     DETECT => detect(),
                     START => start(),
                     CLOSE => {
@@ -407,7 +600,7 @@ unsafe fn create(args: &[String]) -> Result<HWND> {
     anyhow::ensure!(
         InitCommonControlsEx(&INITCOMMONCONTROLSEX {
             dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_PROGRESS_CLASS
+            dwICC: ICC_PROGRESS_CLASS | ICC_LISTVIEW_CLASSES
         })
         .as_bool(),
         "Cannot initialize progress controls"
@@ -428,7 +621,7 @@ unsafe fn create(args: &[String]) -> Result<HWND> {
         left: 0,
         top: 0,
         right: 760,
-        bottom: 645,
+        bottom: 825,
     };
     AdjustWindowRectEx(&mut size, style, false, WINDOW_EX_STYLE::default())?;
     let window = CreateWindowExW(
@@ -609,15 +802,92 @@ unsafe fn create(args: &[String]) -> Result<HWND> {
         0,
         font,
     )?;
-    control(
+    let skills_enable = control(
         window,
-        "STATIC",
-        "开始前请关闭 SecureCRT。卸载将恢复原配置，并保留备份。",
-        WINDOW_STYLE(0),
+        "BUTTON",
+        "安装 AI Skill（默认勾选已检测到的客户端，可多选）",
+        WS_TABSTOP | WS_GROUP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
         24,
         306,
         712,
         26,
+        SKILLS_ENABLE,
+        font,
+    )?;
+    send(skills_enable, BM_SETCHECK, 1, 0);
+    let skills_list = control(
+        window,
+        "SysListView32",
+        "",
+        WS_TABSTOP | WS_BORDER | WINDOW_STYLE(LVS_REPORT | LVS_SHOWSELALWAYS),
+        24,
+        338,
+        712,
+        132,
+        SKILLS_LIST,
+        font,
+    )?;
+    send(
+        skills_list,
+        LVM_SETEXTENDEDLISTVIEWSTYLE,
+        0,
+        (LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_INFOTIP) as isize,
+    );
+    for (index, (title, width)) in [
+        ("客户端", 170),
+        ("检测状态", 138),
+        ("最终 SKILL.md 路径（可横向滚动）", 680),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut title = w(title);
+        let column = LVCOLUMNW {
+            mask: LVCF_TEXT | LVCF_WIDTH,
+            cx: width,
+            pszText: windows::core::PWSTR(title.as_mut_ptr()),
+            ..Default::default()
+        };
+        send(
+            skills_list,
+            LVM_INSERTCOLUMNW,
+            index,
+            &column as *const _ as isize,
+        );
+    }
+    let skills_add = control(
+        window,
+        "BUTTON",
+        "其他客户端 / 添加目录…",
+        WS_TABSTOP,
+        24,
+        479,
+        230,
+        30,
+        SKILLS_ADD,
+        font,
+    )?;
+    let skills_edit = control(
+        window,
+        "BUTTON",
+        "修改选中行目录…",
+        WS_TABSTOP,
+        270,
+        479,
+        190,
+        30,
+        SKILLS_EDIT,
+        font,
+    )?;
+    control(
+        window,
+        "STATIC",
+        "开始安装前请关闭 SecureCRT。",
+        WINDOW_STYLE(0),
+        475,
+        483,
+        261,
+        24,
         0,
         font,
     )?;
@@ -627,7 +897,7 @@ unsafe fn create(args: &[String]) -> Result<HWND> {
         "请选择路径，然后开始安装。",
         WINDOW_STYLE(SS_PATHELLIPSIS.0),
         24,
-        344,
+        524,
         640,
         26,
         0,
@@ -639,7 +909,7 @@ unsafe fn create(args: &[String]) -> Result<HWND> {
         "0%",
         WINDOW_STYLE(SS_RIGHT.0),
         670,
-        344,
+        524,
         66,
         26,
         0,
@@ -651,7 +921,7 @@ unsafe fn create(args: &[String]) -> Result<HWND> {
         "",
         WINDOW_STYLE(0),
         24,
-        376,
+        556,
         712,
         22,
         0,
@@ -664,7 +934,7 @@ unsafe fn create(args: &[String]) -> Result<HWND> {
         "执行步骤",
         WINDOW_STYLE(0),
         24,
-        414,
+        594,
         712,
         23,
         0,
@@ -679,7 +949,7 @@ unsafe fn create(args: &[String]) -> Result<HWND> {
             | WS_VSCROLL
             | WINDOW_STYLE((ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY) as u32),
         24,
-        442,
+        622,
         712,
         143,
         0,
@@ -692,7 +962,7 @@ unsafe fn create(args: &[String]) -> Result<HWND> {
         "重新检测路径",
         WS_TABSTOP,
         24,
-        602,
+        782,
         150,
         32,
         DETECT,
@@ -704,17 +974,18 @@ unsafe fn create(args: &[String]) -> Result<HWND> {
         "开始安装 / 升级",
         WS_TABSTOP | WINDOW_STYLE(BS_DEFPUSHBUTTON as u32),
         418,
-        602,
+        782,
         184,
         32,
         START,
         font,
     )?;
     let close = control(
-        window, "BUTTON", "关闭", WS_TABSTOP, 618, 602, 118, 32, CLOSE, font,
+        window, "BUTTON", "关闭", WS_TABSTOP, 618, 782, 118, 32, CLOSE, font,
     )?;
     let (tx, rx) = mpsc::channel();
     let installed = Installation::load().ok();
+    let clients = skills::discover(installed.as_ref());
     let mut ui = Ui {
         window,
         install,
@@ -731,6 +1002,11 @@ unsafe fn create(args: &[String]) -> Result<HWND> {
         detect,
         start,
         close,
+        skills_enable,
+        skills_list,
+        skills_add,
+        skills_edit,
+        clients,
         title_font,
         font,
         tx,
@@ -751,12 +1027,28 @@ unsafe fn create(args: &[String]) -> Result<HWND> {
             },
         );
         let version = i.version.clone();
-        let skill = i.skill_dir.join("SKILL.md");
+        let skill_paths = i.skill_paths();
         append(
             &mut ui,
             &format!("检测到已安装版本 {version}，可升级或卸载。"),
         );
-        append(&mut ui, &format!("已安装的 AI skill：{}", skill.display()));
+        for skill in skill_paths {
+            append(
+                &mut ui,
+                &format!("已安装的 AI Skill：{}", skill.join("SKILL.md").display()),
+            );
+        }
+    }
+    populate_skills(&ui);
+    for client in ui.clients.clone().into_iter().filter(|c| c.selected) {
+        append(
+            &mut ui,
+            &format!(
+                "默认勾选 {}：{}",
+                client.name,
+                client.directory.join("SKILL.md").display()
+            ),
+        );
     }
     if let Some(path) = crate::option(args, "--path") {
         set_text(ui.path, path);
@@ -813,6 +1105,86 @@ pub fn self_test() -> Result<Value> {
             UI.with(|c| -> Result<()> {
                 let mut state = c.borrow_mut();
                 let ui = state.as_mut().context("Setup window missing")?;
+                anyhow::ensure!(
+                    send(ui.skills_enable, BM_GETCHECK, 0, 0).0 == 1,
+                    "Skill installation must default enabled"
+                );
+                let expected = skills::normalize(
+                    ui.clients
+                        .iter()
+                        .filter(|c| c.selected)
+                        .map(|c| c.directory.clone())
+                        .collect(),
+                )?;
+                anyhow::ensure!(
+                    chosen_skills(ui)? == expected,
+                    "Detected clients must be checked by default"
+                );
+                // Exercise real checkbox controls and preserve their selections when toggled.
+                send(ui.skills_enable, BM_SETCHECK, 0, 0);
+                state_controls(ui);
+                anyhow::ensure!(
+                    chosen_skills(ui)?.is_empty(),
+                    "Skip skills did not clear installation plan"
+                );
+                anyhow::ensure!(
+                    !windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(ui.skills_list)
+                        .as_bool(),
+                    "Skill list must be disabled when skipped"
+                );
+                send(ui.skills_enable, BM_SETCHECK, 1, 0);
+                state_controls(ui);
+                anyhow::ensure!(
+                    chosen_skills(ui)? == expected,
+                    "Re-enabling skills lost selections"
+                );
+                let clients = ui.clients.clone();
+                ui.clients = vec![
+                    Client {
+                        name: "Test A".into(),
+                        directory: "C:/Example/A/securecrt-bridge".into(),
+                        detected: true,
+                        selected: true,
+                    },
+                    Client {
+                        name: "Test B".into(),
+                        directory: "C:/Example/B/securecrt-bridge".into(),
+                        detected: true,
+                        selected: true,
+                    },
+                ];
+                populate_skills(ui);
+                anyhow::ensure!(
+                    chosen_skills(ui)?.len() == 2,
+                    "Client checkboxes must support multiple selection"
+                );
+                let unchecked = LVITEMW {
+                    stateMask: LVIS_STATEIMAGEMASK,
+                    state: LIST_VIEW_ITEM_STATE_FLAGS(1 << 12),
+                    ..Default::default()
+                };
+                send(
+                    ui.skills_list,
+                    LVM_SETITEMSTATE,
+                    0,
+                    &unchecked as *const _ as isize,
+                );
+                anyhow::ensure!(
+                    chosen_skills(ui)? == vec![ui.clients[1].directory.clone()],
+                    "Unchecking a client affected the wrong destination"
+                );
+                send(
+                    ui.skills_list,
+                    LVM_SETITEMSTATE,
+                    1,
+                    &unchecked as *const _ as isize,
+                );
+                anyhow::ensure!(
+                    chosen_skills(ui)?.is_empty(),
+                    "Unchecking all clients must skip skills"
+                );
+                ui.clients = clients;
+                populate_skills(ui);
                 append(ui, "界面自检：日志可滚动，进度可更新");
                 send(ui.progress, PBM_SETPOS, 37, 0);
                 anyhow::ensure!(
@@ -836,6 +1208,7 @@ pub fn self_test() -> Result<Value> {
                         launcher: "C:/Example/SecureCRT.exe".into(),
                         config_dir: "C:/Example/Config".into(),
                         skill_dir: "C:/Example/skill".into(),
+                        skill_dirs: None,
                     });
                 }
                 Ok(())
@@ -852,6 +1225,11 @@ pub fn self_test() -> Result<Value> {
                     !windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(ui.path)
                         .as_bool(),
                     "Uninstall target must be fixed"
+                );
+                anyhow::ensure!(
+                    !windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(ui.skills_enable)
+                        .as_bool(),
+                    "Uninstall must not edit skill targets"
                 );
                 Ok(())
             })?;
@@ -895,7 +1273,7 @@ pub fn self_test() -> Result<Value> {
                 Ok(())
             })?;
             Ok(
-                json!({"ok":true,"progress_events":true,"uninstall_mode":true,"busy_controls":true,"error_and_retry":true,"mutations":0}),
+                json!({"ok":true,"progress_events":true,"uninstall_mode":true,"busy_controls":true,"error_and_retry":true,"skill_multi_select":true,"skill_skip_toggle":true,"mutations":0}),
             )
         })();
         let _ = DestroyWindow(window);
