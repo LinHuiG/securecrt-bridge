@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.6
+
+- 新增 `interrupt SESSION --owner CHAT --job REQUEST_ID`：原任务所属对话可向结果未知的会话发送一次 Ctrl+C，解决忙碌锁同时拦住恢复输入的问题。
+- 恢复操作保留原任务锁，读屏确认 shell 恢复后再 `acknowledge`；保护其他对话、正在执行的任务及暂停状态。
+- 更新 skill 的自主恢复与授权复用说明。
+
 ## 0.1.5
 
 - 安装日志输出 skill 文件、程序、配置和备份的完整路径；再次打开安装器即可查看已安装的 skill 路径。

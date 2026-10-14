@@ -31,6 +31,7 @@ struct Session {
     owner: String,
     lease_until: u64,
     busy: Option<String>,
+    interrupt: Option<String>,
 }
 struct Job {
     session: String,
@@ -86,6 +87,13 @@ impl State {
             }
         }
         for s in self.sessions.values_mut() {
+            if s.interrupt.as_ref().is_some_and(|id| {
+                self.jobs
+                    .get(id)
+                    .is_none_or(|j| !matches!(j.status.as_str(), "queued" | "running" | "unknown"))
+            }) {
+                s.interrupt = None;
+            }
             if s.busy.as_ref().is_some_and(|id| {
                 self.jobs.get(id).is_none_or(|j| {
                     j.status != "queued" && j.status != "running" && j.status != "unknown"
@@ -150,7 +158,7 @@ impl State {
             s.screen = field(&v, "screen").chars().take(150_000).collect();
             // An actor restarts with a new id. An unknown job holds the old session
             // busy until its actor explicitly reports a result or reconnects.
-            if let Some(jid) = s.busy.as_ref() {
+            if let Some(jid) = s.interrupt.as_ref().or(s.busy.as_ref()) {
                 if let Some(j) = self.jobs.get_mut(jid) {
                     if j.status == "queued" && !s.paused && !self.paused && s.connected {
                         j.status = "running".into();
@@ -183,7 +191,24 @@ impl State {
                 j.updated = now;
                 if j.status == "done" {
                     if let Some(s) = self.sessions.get_mut(&j.session) {
-                        s.busy = None;
+                        // A recovery keystroke finishing does not establish that
+                        // the original shell is idle. Keep its hold until ack.
+                        if s.busy.as_deref() == Some(jid) {
+                            s.busy = None;
+                            // A late original result makes an undelivered Ctrl+C
+                            // unnecessary. Never let it hit a subsequent command.
+                            if let Some(recovery) =
+                                s.interrupt.as_ref().and_then(|id| self.jobs.get_mut(id))
+                            {
+                                if recovery.status == "queued" {
+                                    recovery.status = "cancelled".into();
+                                    recovery.updated = now;
+                                    s.interrupt = None;
+                                }
+                            }
+                        } else if s.interrupt.as_deref() == Some(jid) {
+                            s.interrupt = None;
+                        }
                     }
                 }
             }
@@ -206,6 +231,9 @@ impl State {
         }
         let id = p[1];
         let action = p[2];
+        if method == "POST" && action == "interrupt" {
+            return self.interrupt(id, &v, now);
+        }
         let Some(s) = self.sessions.get_mut(id) else {
             return fail(404, "Session not found");
         };
@@ -220,10 +248,14 @@ impl State {
         if action == "pause" {
             s.paused = v["paused"].as_bool().unwrap_or(true);
             if s.paused {
-                if let Some(j) = s.busy.as_ref().and_then(|j| self.jobs.get_mut(j)) {
-                    if j.status == "queued" {
-                        j.status = "cancelled".into();
-                        s.busy = None;
+                for jid in [s.busy.as_ref(), s.interrupt.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(j) = self.jobs.get_mut(jid) {
+                        if j.status == "queued" {
+                            j.status = "cancelled".into();
+                        }
                     }
                 }
             }
@@ -237,7 +269,25 @@ impl State {
             if s.owner != owner {
                 return fail(409, "Unresolved operation belongs to another owner");
             }
+            let mut recovery_acknowledged = false;
+            if let Some(recovery) = s.interrupt.as_ref().and_then(|id| self.jobs.get_mut(id)) {
+                if matches!(recovery.status.as_str(), "queued" | "running") {
+                    return fail(
+                        409,
+                        "Recovery input is still pending; query its request first",
+                    );
+                }
+                if recovery.status == "unknown" {
+                    recovery.status = "acknowledged".into();
+                    recovery.updated = now;
+                    recovery_acknowledged = true;
+                }
+                s.interrupt = None;
+            }
             let Some(j) = s.busy.as_ref().and_then(|id| self.jobs.get_mut(id)) else {
+                if recovery_acknowledged {
+                    return ok(json!({"ok":true}));
+                }
                 return fail(409, "No unresolved operation");
             };
             if j.status != "unknown" {
@@ -251,7 +301,7 @@ impl State {
             if s.owner != owner {
                 return fail(409, "Lease belongs to another owner");
             }
-            if s.busy.is_some() {
+            if s.busy.is_some() || s.interrupt.is_some() {
                 return fail(409, "Session still busy");
             }
             s.lease_until = 0;
@@ -265,7 +315,7 @@ impl State {
             return fail(409, "Session is held by another chat");
         }
         if action == "claim" {
-            if s.busy.is_some() && s.owner != owner {
+            if (s.busy.is_some() || s.interrupt.is_some()) && s.owner != owner {
                 return fail(409, "Previous operation is unresolved");
             }
             s.owner = owner.into();
@@ -298,7 +348,7 @@ impl State {
         if s.owner != owner || s.lease_until <= now {
             return fail(409, "Claim the session before writing");
         }
-        if s.busy.is_some() {
+        if s.busy.is_some() || s.interrupt.is_some() {
             return fail(409, "Session busy; query previous request");
         }
         let command = field(&v, if action == "exec" { "command" } else { "text" });
@@ -326,6 +376,76 @@ impl State {
             },
         );
         ok(json!({"ok":true,"id":request_id,"status":"queued"}))
+    }
+
+    /// Queue exactly one Ctrl+C for a named unresolved operation. This uses the
+    /// existing actor input protocol and works with already-loaded 0.1.5 DLLs.
+    fn interrupt(&mut self, id: &str, v: &Value, now: u64) -> (u16, Value) {
+        let owner = field(v, "owner");
+        let request_id = field(v, "request_id");
+        let original = field(v, "job_id");
+        if owner.is_empty() || owner.len() > 128 || !sid_valid(request_id) || !sid_valid(original) {
+            return fail(400, "Provide owner, unique request_id and original job_id");
+        }
+        let Some(s) = self.sessions.get_mut(id) else {
+            return fail(404, "Session not found");
+        };
+        if s.owner != owner {
+            return fail(409, "Unresolved operation belongs to another owner");
+        }
+        let payload =
+            json!({"owner":owner,"request_id":request_id,"recovery_for":original,"text":"\u{3}"});
+        if let Some(j) = self.jobs.get(request_id) {
+            return if j.session == id && j.owner == owner && j.payload == payload {
+                ok(json!({"ok":true,"id":request_id,"status":j.status,"duplicate":true}))
+            } else {
+                fail(409, "request_id collision")
+            };
+        }
+        if self.paused || s.paused {
+            return fail(409, "Bridge is paused");
+        }
+        if !s.connected || now.saturating_sub(s.last_seen) > 5000 {
+            return fail(
+                409,
+                "Session is offline; wait for actor to finish capturing output",
+            );
+        }
+        if s.lease_until <= now {
+            return fail(409, "Renew the session lease before recovery");
+        }
+        if s.interrupt.is_some() {
+            return fail(409, "Recovery input is unresolved; query its request first");
+        }
+        if s.busy.as_deref() != Some(original)
+            || !self
+                .jobs
+                .get(original)
+                .is_some_and(|j| j.owner == owner && j.status == "unknown")
+        {
+            return fail(409, "Recovery requires your current unknown job; it cannot interrupt a running or different job");
+        }
+        if self.jobs.len() >= 100_000 {
+            return fail(429, "Request history is full");
+        }
+        let deadline = now + 15_000;
+        s.lease_until = s.lease_until.max(deadline + 10_000);
+        s.interrupt = Some(request_id.into());
+        self.jobs.insert(
+            request_id.into(),
+            Job {
+                session: id.into(),
+                owner: owner.into(),
+                payload,
+                status: "queued".into(),
+                result: Value::Null,
+                deadline,
+                updated: now,
+                submitted: now,
+                started: None,
+            },
+        );
+        ok(json!({"ok":true,"id":request_id,"status":"queued","job_id":original}))
     }
 }
 
@@ -642,5 +762,186 @@ mod tests {
         worker.join().unwrap().unwrap();
         assert_eq!(good.unwrap()["ok"], true);
         assert_eq!(rejected.unwrap()["http_status"], 401);
+    }
+
+    fn unresolved() -> State {
+        let mut s = State::default();
+        actor(&mut s);
+        s.request("POST", "/sessions/tab/claim", json!({"owner":"one"}));
+        s.request(
+            "POST",
+            "/sessions/tab/exec",
+            json!({"owner":"one","request_id":"original","command":"pwd"}),
+        );
+        actor(&mut s);
+        s.request(
+            "POST",
+            "/actor/result",
+            json!({"id":"original","session":"tab","result":{"outcome":"unknown"}}),
+        );
+        s
+    }
+    fn recovery() -> Value {
+        json!({"owner":"one","request_id":"recovery","job_id":"original"})
+    }
+    #[test]
+    fn recovery_sends_only_ctrl_c_once_and_retains_original_hold() {
+        let mut s = unresolved();
+        let mut p = recovery();
+        p["text"] = "ignored arbitrary input".into();
+        assert_eq!(
+            s.request("POST", "/sessions/tab/interrupt", p.clone()).0,
+            200
+        );
+        assert_eq!(
+            s.request("POST", "/sessions/tab/acknowledge", json!({"owner":"one"}))
+                .0,
+            409
+        );
+        let poll = s
+            .request("POST", "/actor/poll", json!({"id":"tab","connected":true}))
+            .1;
+        assert_eq!(poll["job"]["id"], "recovery");
+        assert_eq!(poll["job"]["payload"]["text"], "\u{3}");
+        assert_eq!(
+            s.request("POST", "/sessions/tab/interrupt", p).1["duplicate"],
+            true
+        );
+        assert!(s
+            .request("POST", "/actor/poll", json!({"id":"tab","connected":true}))
+            .1["job"]
+            .is_null());
+        assert_eq!(
+            s.request("POST", "/sessions/tab/acknowledge", json!({"owner":"one"}))
+                .0,
+            409
+        );
+        s.request(
+            "POST",
+            "/actor/result",
+            json!({"id":"recovery","session":"tab","result":{"ok":true,"sent":true}}),
+        );
+        assert_eq!(s.sessions["tab"].busy.as_deref(), Some("original"));
+        assert_eq!(s.jobs["original"].status, "unknown");
+        assert_eq!(
+            s.request(
+                "POST",
+                "/sessions/tab/input",
+                json!({"owner":"one","request_id":"extra","text":"pwd\r"})
+            )
+            .0,
+            409
+        );
+        assert_eq!(
+            s.request("POST", "/sessions/tab/claim", json!({"owner":"two"}))
+                .0,
+            409
+        );
+        actor(&mut s);
+        assert_eq!(
+            s.request("POST", "/sessions/tab/acknowledge", json!({"owner":"one"}))
+                .0,
+            200
+        );
+        assert_eq!(
+            s.request(
+                "POST",
+                "/sessions/tab/exec",
+                json!({"owner":"one","request_id":"next","command":"pwd"})
+            )
+            .0,
+            200
+        );
+    }
+    #[test]
+    fn recovery_rejects_wrong_owner_wrong_job_running_paused_and_expired_lease() {
+        for case in [
+            "owner",
+            "job",
+            "running",
+            "paused",
+            "session_paused",
+            "lease",
+            "offline",
+        ] {
+            let mut s = unresolved();
+            let mut p = recovery();
+            match case {
+                "owner" => p["owner"] = "two".into(),
+                "job" => p["job_id"] = "other-job".into(),
+                "running" => s.jobs.get_mut("original").unwrap().status = "running".into(),
+                "paused" => s.paused = true,
+                "session_paused" => s.sessions.get_mut("tab").unwrap().paused = true,
+                "lease" => s.sessions.get_mut("tab").unwrap().lease_until = 0,
+                "offline" => s.sessions.get_mut("tab").unwrap().connected = false,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                s.request("POST", "/sessions/tab/interrupt", p).0,
+                409,
+                "{case}"
+            );
+            assert!(s.sessions["tab"].interrupt.is_none());
+        }
+    }
+    #[test]
+    fn late_original_result_cancels_pending_recovery() {
+        let mut s = unresolved();
+        s.request("POST", "/sessions/tab/interrupt", recovery());
+        s.request(
+            "POST",
+            "/actor/result",
+            json!({"id":"original","session":"tab","result":{"outcome":"completed","exit_code":0}}),
+        );
+        assert_eq!(s.jobs["recovery"].status, "cancelled");
+        assert!(s
+            .request("POST", "/actor/poll", json!({"id":"tab","connected":true}))
+            .1["job"]
+            .is_null());
+    }
+    #[test]
+    fn recovery_pause_prevents_delivery_and_unknown_recovery_can_be_acknowledged() {
+        for global in [false, true] {
+            let mut s = unresolved();
+            s.request("POST", "/sessions/tab/interrupt", recovery());
+            s.request(
+                "POST",
+                if global {
+                    "/pause"
+                } else {
+                    "/sessions/tab/pause"
+                },
+                json!({"paused":true}),
+            );
+            assert_eq!(s.jobs["recovery"].status, "cancelled");
+            assert!(s
+                .request("POST", "/actor/poll", json!({"id":"tab","connected":true}))
+                .1["job"]
+                .is_null());
+        }
+        let mut s = unresolved();
+        s.request("POST", "/sessions/tab/interrupt", recovery());
+        actor(&mut s);
+        s.request(
+            "POST",
+            "/actor/result",
+            json!({"id":"recovery","session":"tab","result":{"outcome":"unknown"}}),
+        );
+        assert_eq!(
+            s.request(
+                "POST",
+                "/sessions/tab/interrupt",
+                json!({"owner":"one","request_id":"retry","job_id":"original"})
+            )
+            .0,
+            409
+        );
+        assert_eq!(
+            s.request("POST", "/sessions/tab/acknowledge", json!({"owner":"one"}))
+                .0,
+            200
+        );
+        assert_eq!(s.jobs["recovery"].status, "acknowledged");
+        assert_eq!(s.jobs["original"].status, "acknowledged");
     }
 }

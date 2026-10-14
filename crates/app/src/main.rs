@@ -114,10 +114,14 @@ fn run(args: &[String]) -> Result<()> {
                 &json!({"owner":owner}),
             )?)
         }
-        "exec" | "input" => {
+        "exec" | "input" | "interrupt" => {
             let id = args.get(1).context("Provide SESSION_ID")?;
             let owner = option(args, "--owner").context("Provide --owner CHAT_ID")?;
-            let text = if let Some(file) = option(args, "--file") {
+            let text = if command == "interrupt" {
+                option(args, "--job")
+                    .context("Provide --job ORIGINAL_REQUEST_ID")?
+                    .to_owned()
+            } else if let Some(file) = option(args, "--file") {
                 std::fs::read_to_string(file)?
             } else if args.iter().any(|a| a == "--stdin") {
                 use std::io::Read;
@@ -146,7 +150,11 @@ fn run(args: &[String]) -> Result<()> {
             // Print the id before dispatch, so even a failed HTTP response is recoverable.
             eprintln!("request_id={request_id}");
             let mut p = json!({"owner":owner,"request_id":request_id,"timeout_seconds":timeout});
-            p[if command == "exec" { "command" } else { "text" }] = text.into();
+            p[match command {
+                "exec" => "command",
+                "interrupt" => "job_id",
+                _ => "text",
+            }] = text.into();
             let result = local("POST", &format!("/sessions/{id}/{command}"), &p)?;
             if result["ok"] != true {
                 return output(result);
@@ -169,6 +177,7 @@ fn run(args: &[String]) -> Result<()> {
             }
         }
         "help" | "--help" | "-h" => {
+            println!("interrupt SESSION --owner CHAT --job ORIGINAL_REQUEST_ID [--request-id ID] [--async]\nSends Ctrl+C for your unknown job; inspect the fresh screen, then acknowledge.");
             println!("SecureCRT Bridge {}\ninstall [--path SecureCRT.exe] [--config Config] | repair | uninstall\ndetect | start | stop | doctor | sessions | screen SESSION\nclaim SESSION --owner CHAT | release SESSION --owner CHAT\nexec SESSION --owner CHAT --command TEXT [--timeout 30] [--request-id ID] [--async]\ninput SESSION --owner CHAT --text TEXT | result REQUEST_ID\npause [SESSION] | resume [SESSION]\nCommand text may also be provided by --file UTF8_FILE or --stdin.",scb_core::VERSION);
             Ok(())
         }

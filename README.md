@@ -12,10 +12,11 @@
 - **常规安装界面**：自动查找路径、手动浏览目录、安装／升级／卸载切换、进度条和逐步执行日志。
 - **跨 AI 会话使用**：安装用户级 `securecrt-bridge` skill，其他 Codex 对话可发现安装路径与现有终端。
 - **可暂停、可恢复**：托盘控制暂停与退出，安装前备份配置，卸载按记录恢复，保留用户后续修改。
+- **自主恢复续行输入**：AI 可对自己结果未知的任务发送 Ctrl+C，读屏确认恢复后继续操作，无需默认让用户按键。
 
 ## 下载与安装
 
-在 [Releases](https://github.com/LinHuiG/securecrt-bridge/releases) 下载 `SecureCRTBridge-0.1.5-Setup.exe`。
+在 [Releases](https://github.com/LinHuiG/securecrt-bridge/releases) 下载 `SecureCRTBridge-0.1.6-Setup.exe`。
 
 1. 关闭 SecureCRT。
 2. 双击安装包，确认 **SecureCRT 安装目录** 和 **配置目录**。找不到时使用“浏览…”；配置目录应包含 `Sessions/Default.ini`。
@@ -47,18 +48,46 @@ GUI 子系统 EXE 在 PowerShell 中建议接 `| Out-String`，确保等待结�
 
 `exec` 要求终端处于空闲的 POSIX shell 提示符。命令在 `sh -c` 子 shell 中运行，不改变父 shell 的目录或环境；需要目录上下文时写成 `cd /path && ...`。交互式程序可用 `input`，但它只发送输入，不自动判断执行完成。
 
+### 恢复未完成的 shell 输入
+
+若自己的任务因输入冲突停在续行提示符 `>`，普通 `input` 会被未知任务锁阻止。0.1.6 提供专门的恢复入口：
+
+```powershell
+& $scb claim SESSION_ID --owner my-task | Out-String
+& $scb interrupt SESSION_ID --owner my-task --job ORIGINAL_REQUEST_ID | Out-String
+& $scb screen SESSION_ID | Out-String
+# 等待新的屏幕快照并确认普通 shell 提示符后，再解除原任务锁。
+& $scb acknowledge SESSION_ID --owner my-task | Out-String
+```
+
+恢复请求只能发送一次 Ctrl+C，不接受任意恢复命令，也不会自动重跑原命令。它要求同一租约所有者、匹配的未知任务 ID 和已回到轮询状态的引擎；不会抢占正在运行的输出采集。返回 `sent` 只表示按键已发送，需要核对新的屏幕内容。
+
+### AI 客户端与审批
+
+当前安装器将 skill 安装到 `CODEX_HOME/skills/securecrt-bridge`，未设置时使用 `%USERPROFILE%/.codex/skills/securecrt-bridge`。即使未安装 Codex，也会创建此目录；当前界面没有其他客户端的 skill 路径选择项。其他客户端可调用通用 CLI/HTTP，skill 的位置与格式需要按客户端约定配置。
+
+只读查询可配置持久允许规则；远程写入按具体操作和已有授权范围处理。skill 会复用同一任务内已授权的操作，不要求每次查询都重新确认。宿主沙箱和审批规则仍然生效，具体配置及边界见 [审批配置](docs/APPROVALS.md)。
+
 ## 技术方案
 
 ```mermaid
-flowchart LR
-    A["AI / CLI"] -->|"带令牌的 localhost HTTP"| B["Rust Broker"]
-    B <-->|"轮询、任务、结果"| C["Rust Active Scripting COM 引擎"]
-    C <-->|"SecureCRT 脚本 API"| D["用户的 SSH 标签页"]
-    E["安装器"] -->|"备份并设置登录钩子"| C
+flowchart TB
+    U["用户"] <-->|"操作和查看"| UI
+    subgraph CRT["SecureCRT 进程"]
+        UI["原有终端界面"]
+        T["原有 SSH 会话"]
+        D["Rust COM 引擎 DLL"]
+        UI <-->|"输入与显示"| T
+        D <-->|"调用内置终端读写方法"| T
+    end
+    T <-->|"SSH"| S["远程服务器"]
+    A["AI / CLI"] <-->|"HTTP + JSON"| B["Rust Broker"]
+    D <-->|"轮询任务、回传结果"| B
 ```
 
 - **Native engine**：实现 Active Scripting COM 接口，使用独立 ProgID `SecureCRTBridge.Native`。SecureCRT 登录脚本载入它后，保留 `crt.GetScriptTab()` 的实际标签页对象；终端调用始终留在宿主脚本线程。
 - **Broker**：仅监听 `127.0.0.1`，为每个标签页维护状态、写入租约和请求 ID。AI 可并行使用不同会话，不依赖窗口焦点或标签页顺序。
+- **通信与轮询**：HTTP/1.1 + UTF-8 JSON，使用 Bearer 令牌。空闲 DLL 约每 200ms 上报屏幕并领取任务；CLI 默认约每 150ms 查询任务结果。DLL 通过进程内方法访问 SecureCRT，不额外运行一层 VBScript/Python。
 - **结果采集**：把命令包在开始／结束标记之间，使用 `Screen.ReadString` 获取输出和退出码。标记在发送字符串中拆开，避免误匹配终端命令回显。
 - **显示处理**：空闲时关闭同步缓冲，让用户窗口持续刷新；采集期间使用同步读取，所有退出路径恢复显示。
 - **安装器**：原生 Win32 控件加工作线程。文件写入、配置备份、COM 注册、启动项设置和服务启动通过进度事件更新窗口。
@@ -80,6 +109,7 @@ assets/skill    AI 使用说明
 - 每次写入先生成请求 ID。超时或断线时先查询 `result REQUEST_ID`，不得凭超时判断“没执行”并重发。
 - 请求去重与结果记录属于当前服务生命周期，不是跨重启的 exactly-once 保证。未知结果会保持会话占用，确认 shell 已空闲后才能 `acknowledge`。
 - 命令最多等待 300 秒，结果上限 1 MiB；普通历史输出约 30 分钟后清理，未确认的未知结果需显式处理。暂停取消未派发任务，不会中断已经在服务器运行的命令。
+- 0.1.6 增加自主恢复：若自己的未知任务停在 shell 续行提示符，续租后运行 `interrupt SESSION_ID --owner CHAT_ID --job ORIGINAL_REQUEST_ID` 发送一次 Ctrl+C；查询恢复任务并读取新的屏幕快照，确认普通提示符后再 `acknowledge`。普通输入仍受锁保护，不能中断其他对话或尚在采集输出的任务。
 - 现有内置 Python 或不支持的登录脚本会跳过，保留原设置。ActiveX 脚本串联已实现，但尚未覆盖第三方脚本实测。显式 `/SCRIPT` 启动参数会覆盖默认登录钩子。
 - 安装器不会绕过堡垒机认证、SecureCRT 许可或 AI 所在环境的权限限制。
 

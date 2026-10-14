@@ -22,9 +22,12 @@ AppData\Local\SecureCRTBridge；不要分享 connection.json。
   securecrt-bridge.exe claim SESSION_ID --owner CHAT_ID
   securecrt-bridge.exe exec SESSION_ID --owner CHAT_ID --command "hostname; pwd"
   securecrt-bridge.exe release SESSION_ID --owner CHAT_ID
+  securecrt-bridge.exe interrupt SESSION_ID --owner CHAT_ID --job ORIGINAL_REQUEST_ID
 
-你和 AI 共用终端，请轮流操作。暂停仅取消未发送命令；远程已运行的命令
-需要在终端 Ctrl+C。超时不会自动重试或自动 Ctrl+C。exec 只适用于 POSIX shell。
+你和 AI 共用终端，请轮流操作。暂停仅取消未发送命令。
+自己的未知任务停在续行提示符时，可用 interrupt 发送一次 Ctrl+C；
+读取新的屏幕快照并确认普通提示符后，再 acknowledge 解锁。
+恢复不会自动重跑原命令，也不会抢占尚在采集输出的任务。exec 只适用于 POSIX shell。
 
 升级/修复：关闭 SecureCRT，重新运行安装包或执行 repair。
 卸载：关闭 SecureCRT，从 Windows 已安装的应用卸载，或执行 uninstall --gui。
@@ -36,3 +39,5 @@ AppData\Local\SecureCRTBridge；不要分享 connection.json。
 显式 /SCRIPT 参数覆盖会话登录钩子，此类启动方式需要另行配置。
 其他线程使用用户级 securecrt-bridge skill 自动发现安装路径和会话。
 skill 不改变 AI 所在沙箱的权限，也不保存远程账号密码。
+当前 skill 默认安装到 CODEX_HOME/skills 或用户 .codex/skills，
+尚未提供其他 AI 客户端的 skill 目录选择。

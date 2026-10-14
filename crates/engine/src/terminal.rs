@@ -403,6 +403,18 @@ mod tests {
         assert!(data.borrow().sent.is_empty());
     }
     #[test]
+    fn recovery_ctrl_c_is_sent_once_without_shell_framing_or_output_capture() {
+        let data = Rc::new(RefCell::new(Data::default()));
+        let raw: IDispatch = Mock { data: data.clone() }.into();
+        let screen = Dispatch(raw);
+        let job = json!({"id":"recovery","deadline":now_ms()+15000,"payload":{"text":"\u{3}","recovery_for":"original"}});
+        let result = execute(&screen, &screen, &job, &AtomicBool::new(false)).unwrap();
+        assert_eq!(result["sent"], true);
+        assert_eq!(data.borrow().sent, vec!["\u{3}"]);
+        assert_eq!(data.borrow().reads, 0);
+        assert!(!data.borrow().sync);
+    }
+    #[test]
     fn delayed_output_keeps_the_prefix_and_timeout_never_retries() {
         for force_timeout in [false, true] {
             let data = Rc::new(RefCell::new(Data {
