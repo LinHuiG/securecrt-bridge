@@ -176,7 +176,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "scb-core"
-version = "0.1.7"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "serde",
@@ -188,7 +188,7 @@ dependencies = [
 
 [[package]]
 name = "scb-engine"
-version = "0.1.7"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "scb-core",
@@ -199,7 +199,7 @@ dependencies = [
 
 [[package]]
 name = "securecrt-bridge"
-version = "0.1.7"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "scb-core",

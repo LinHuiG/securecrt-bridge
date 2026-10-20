@@ -7,7 +7,14 @@ fn main() {
     } else {
         "pub static ENGINE: &[u8] = &[];".into()
     };
-    std::fs::write(out.join("payload.rs"), text).unwrap();
+    println!("cargo:rerun-if-env-changed=SCB_SESSION_EXE");
+    let session = if let Ok(path) = std::env::var("SCB_SESSION_EXE") {
+        println!("cargo:rerun-if-changed={path}");
+        format!("pub static SESSION: &[u8] = include_bytes!({path:?});")
+    } else {
+        "pub static SESSION: &[u8] = &[];".into()
+    };
+    std::fs::write(out.join("payload.rs"), text + &session).unwrap();
     let crate_dir = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let manifest = crate_dir
         .parent()

@@ -291,11 +291,7 @@ fn set_candidate(ui: &Ui, c: &Candidate) {
         ui.destination,
         &format!(
             "桥接组件目录：{}",
-            c.launcher
-                .parent()
-                .unwrap_or(&c.launcher)
-                .join("SecureCRTBridge")
-                .display()
+            crate::setup::default_directory(ui.installed.as_ref()).display()
         ),
     );
 }
@@ -793,7 +789,7 @@ unsafe fn create(args: &[String]) -> Result<HWND> {
     let destination = control(
         window,
         "STATIC",
-        "桥接组件将安装到所选目录的 SecureCRTBridge 子目录。",
+        "桥接组件默认安装到用户程序目录；升级沿用原位置。",
         WINDOW_STYLE(SS_PATHELLIPSIS.0),
         24,
         275,

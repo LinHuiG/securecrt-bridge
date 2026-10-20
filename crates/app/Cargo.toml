@@ -12,6 +12,10 @@ path = "src/main.rs"
 name = "securecrt-diagnose"
 path = "src/diagnose.rs"
 
+[[bin]]
+name = "securecrt-session"
+path = "src/session_main.rs"
+
 [dependencies]
 scb-core = { path = "../core" }
 anyhow.workspace = true

@@ -22,6 +22,29 @@ Select the intended session by its returned opaque `id`, caption, and screen con
 
 The window need not be in the foreground. Each actor retains its actual tab object, so switching tabs does not redirect a command. Different session IDs may be used concurrently with independent leases; writes to one session are serialized. Do not use focus changes or tab indexes to choose a target.
 
+## One approval per working session (0.1.8+)
+
+Prefer `securecrt-session.exe SESSION_ID --owner CHAT_ID` from the installed bridge directory when the host supports a persistent process with stdin. Request approval once to keep this channel open for the user's task on that specific terminal, stating the terminal and task scope. Keep the returned process handle; send subsequent requests through its stdin instead of launching a new CLI each time. Do not request a permanent allow rule for the session executable or `exec`.
+
+Start the resolved absolute **securecrt-session.exe** using an interactive process (`exec_command` with `tty: true` in Codex); continue with `write_stdin` and its returned session handle. **Do not append `Out-String`**, which buffers until exit. This console executable preserves stdin under PowerShell; the GUI executable's `attach` subcommand is only suitable for clients explicitly supplying stdin/stdout pipes. The channel claims its fixed terminal and emits a JSON `ready` event with a fresh screen. Verify the shell before sending commands. Broker credentials are pinned at startup; a Broker restart requires a new channel. PTYs may echo input JSON; distinguish it from actual response events.
+
+Send one JSON object per line with a final newline, using a serializer to preserve quotes, newlines and Unicode. Examples (send only the appropriate request, not this whole sequence):
+
+```json
+{"op":"screen"}
+{"op":"exec","command":"hostname; pwd","timeout":15}
+{"op":"result","request_id":"RETURNED_REQUEST_ID"}
+{"op":"interrupt","job_id":"UNKNOWN_REQUEST_ID"}
+{"op":"acknowledge"}
+{"op":"close"}
+```
+
+Writes are asynchronous: `dispatch` emits the request ID before sending, then the response confirms submission. Query `result` until terminal status and inspect output before dependent work. `input` accepts `text`; writes optionally accept `request_id` for identical-payload deduplication. `claim` renews the lease; writes renew it automatically. Recovery has the same preconditions as the standalone commands below.
+
+The channel cannot switch session/owner or install, stop, resume or configure the service. Close it at task completion. `close` or EOF exits and attempts to release the lease; busy/unknown jobs keep their hold and require explicit recovery. Closing does not cancel remote work. After channel exit or terminal reconnection with a new ID, obtain new launch approval if required by the host. If the host cannot retain stdin, use standalone commands with normal approvals. Do not work around a rejected launch using another transport.
+
+## Standalone commands and recovery
+
 ```powershell
 & $scb screen SESSION_ID | Out-String
 & $scb claim SESSION_ID --owner CHAT_ID | Out-String
@@ -48,6 +71,6 @@ An unknown outcome holds the session busy, including ordinary `input`. If your o
 
 `pause [SESSION_ID]` and `resume [SESSION_ID]` control bridge input. Pause cancels queued commands; it does not stop a command already running remotely. The user can interrupt in their terminal using Ctrl+C. Do not resume a user-paused bridge without their intent to do so.
 
-Approval scope: reuse the user's authorization for screen/session/result reads throughout the task. For remote writes, obtain approval when the intended action is outside the existing request; reuse explicit approval for the same operation type on the same targets and scope. A change of host, data scope, or consequence requires reassessment. Do not ask for separate confirmation for every status poll or for steps already authorized. `exec` is an arbitrary shell operation, even if its command happens to inspect data; do not broadly allowlist `exec` or classify it by its first word alone. Prefer direct CLI calls with the resolved absolute executable path and one operation per invocation so narrow command rules can match; avoid enclosing routine calls in a changing PowerShell script.
+Approval scope: reuse the user's authorization throughout the task and approved channel lifetime. Do not ask separately for every command or status poll already covered. A change of host, data scope, or consequences outside the user's request requires reassessment. `attach` and `exec` accept arbitrary shell input on the selected terminal; do not classify them as read-only or broadly allowlist them. For standalone calls, use the resolved absolute EXE path and one operation per invocation so narrow command rules can match.
 
 The API only listens on 127.0.0.1 and uses a local bearer token. Prefer the CLI; never display, copy into a skill, or commit connection.json. Local sandbox filesystem/network restrictions still apply; the skill grants no extra access and no extra authority to mutate remote systems. Operate only within the user's task authorization.

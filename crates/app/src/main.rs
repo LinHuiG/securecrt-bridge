@@ -2,6 +2,7 @@
 mod installer;
 mod installer_ui;
 mod platform;
+mod setup;
 mod skills;
 mod tray;
 use anyhow::{bail, Context, Result};
@@ -19,6 +20,13 @@ use std::{
 include!(concat!(env!("OUT_DIR"), "/payload.rs"));
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|s| s == "--nsis") {
+        if let Err(error) = setup::entry(&args) {
+            setup::log(&format!("ERROR: {error:#}"));
+            std::process::exit(1);
+        }
+        return;
+    }
     let gui = args.is_empty() || args.iter().any(|s| s == "--gui");
     if let Err(e) = run(&args) {
         let value = json!({"ok":false,"error":format!("{e:#}")});
@@ -60,6 +68,7 @@ fn run(args: &[String]) -> Result<()> {
     }
     match command {
         "setup" => installer_ui::run(args),
+        "setup-export" | "setup-validate" | "setup-apply" => output(setup::run(command, args)?),
         "--installer-self-test" => output(installer_ui::self_test()?),
         "install" | "repair" => output(installer::install(args, command == "repair")?),
         "uninstall" => output(installer::uninstall(args)?),
@@ -77,6 +86,18 @@ fn run(args: &[String]) -> Result<()> {
         }
         "status" | "health" => output(local("GET", "/health", &json!({}))?),
         "sessions" => output(local("GET", "/sessions", &json!({}))?),
+        "attach" => {
+            let id = args.get(1).context("attach SESSION_ID --owner CHAT_ID")?;
+            let owner = option(args, "--owner").context("Provide --owner CHAT_ID")?;
+            let connection = Discovery::load()?;
+            scb_core::channel::run(
+                id,
+                owner,
+                &mut std::io::stdin().lock(),
+                &mut std::io::stdout().lock(),
+                |method, path, body| http::call(&connection, method, path, body),
+            )
+        }
         "doctor" => {
             let install = Installation::load().ok();
             let connection = Discovery::load().ok();
@@ -180,6 +201,7 @@ fn run(args: &[String]) -> Result<()> {
             }
         }
         "help" | "--help" | "-h" => {
+            println!("attach SESSION --owner CHAT\nKeeps one authorized process open. Send JSON lines on stdin: screen, exec, input, result, interrupt, acknowledge, close. Writes return request IDs; query result before proceeding.");
             println!("interrupt SESSION --owner CHAT --job ORIGINAL_REQUEST_ID [--request-id ID] [--async]\nSends Ctrl+C for your unknown job; inspect the fresh screen, then acknowledge.");
             println!("SecureCRT Bridge {}\ninstall [--path SecureCRT.exe] [--config Config] [--skills auto|none] [--skill-dir ABSOLUTE_DIR ...] | repair | uninstall\ndetect | start | stop | doctor | sessions | screen SESSION\nclaim SESSION --owner CHAT | release SESSION --owner CHAT\nexec SESSION --owner CHAT --command TEXT [--timeout 30] [--request-id ID] [--async]\ninput SESSION --owner CHAT --text TEXT | result REQUEST_ID\npause [SESSION] | resume [SESSION]\nCommand text may also be provided by --file UTF8_FILE or --stdin.",scb_core::VERSION);
             Ok(())
@@ -197,6 +219,9 @@ fn start() -> Result<()> {
         .unwrap_or(std::env::current_exe()?);
     std::process::Command::new(exe)
         .arg("serve")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .creation_flags(0x08000000)
         .spawn()?;
     for _ in 0..30 {

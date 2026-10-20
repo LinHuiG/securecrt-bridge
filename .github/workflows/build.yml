@@ -28,19 +28,21 @@ jobs:
       - name: Build bundled installer
         shell: pwsh
         run: ./build.ps1 release
+      - name: Ensure NSIS compiler
+        shell: pwsh
+        run: |
+          if (!(Test-Path 'C:/Program Files (x86)/NSIS/makensis.exe')) { choco install nsis --no-progress -y }
+      - name: Test persistent console channel
+        shell: pwsh
+        run: python tests/channel_process.py --exe "$pwd/target/release/securecrt-session.exe" --data "$pwd/target/channel-smoke"
       - name: Test installer controls
         shell: pwsh
         run: |
           $report = (& ./target/release/securecrt-bridge.exe --installer-self-test | Out-String) | ConvertFrom-Json
           if (-not $report.ok) { throw 'Installer self-test failed' }
           $report | ConvertTo-Json
-          New-Item -ItemType Directory -Path dist -Force | Out-Null
-          $version = ((Get-Content Cargo.toml -Raw) | Select-String 'version = "([^"]+)"').Matches[0].Groups[1].Value
-          Copy-Item target/release/securecrt-bridge.exe "dist/SecureCRTBridge-$version-Setup.exe"
-          Get-FileHash dist/*.exe -Algorithm SHA256 | Format-Table | Out-File dist/SHA256.txt
+          ./package.ps1 -NsisPath 'C:/Program Files (x86)/NSIS/makensis.exe'
       - uses: actions/upload-artifact@v4
         with:
           name: SecureCRTBridge-Windows-x64
           path: dist/
-
-

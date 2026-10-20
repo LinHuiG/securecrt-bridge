@@ -33,7 +33,10 @@ try {
     if($LASTEXITCODE -ne 0){throw 'Engine build failed'}
     $targetDir=if($env:CARGO_TARGET_DIR){$env:CARGO_TARGET_DIR}else{Join-Path $PSScriptRoot 'target'}
     $env:SCB_ENGINE_DLL=Join-Path $targetDir 'release/scb_engine.dll'
-    & $cargo build @common --release -p securecrt-bridge
+    & $cargo build @common --release -p securecrt-bridge --bin securecrt-session
+    if($LASTEXITCODE -ne 0){throw 'Session console build failed'}
+    $env:SCB_SESSION_EXE=Join-Path $targetDir 'release/securecrt-session.exe'
+    & $cargo build @common --release -p securecrt-bridge --bin securecrt-bridge --bin securecrt-diagnose
   } elseif($Mode -eq 'check') { & $cargo check @common --workspace }
   else { & $cargo test @common --workspace --lib --bins }
   if($LASTEXITCODE -ne 0){throw 'Cargo failed'}

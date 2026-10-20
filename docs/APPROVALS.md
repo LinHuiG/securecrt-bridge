@@ -2,6 +2,14 @@
 
 桥接令牌用于认证本机调用方，租约用于协调会话写入；AI 宿主的审批决定哪些工具操作可以执行。这是三个不同的机制。
 
+## 同一会话批准一次
+
+0.1.8 增加 `securecrt-session.exe SESSION_ID --owner CHAT_ID` 长连接入口。首次启动时批准在指定终端完成当前任务，后续通过该进程的 stdin 发送 JSON 行，无需为每条命令再启动 CLI。在 Codex 中用 `exec_command` 的 `tty: true` 保留进程，保存返回的 `session_id`，后续用 `write_stdin` 发送以换行结尾的 JSON。启动时不要接 `Out-String`。专用控制台 EXE 保留 PowerShell 标准输入；GUI EXE 的 `attach` 兼容入口仅供主动连接 stdin/stdout 管道的客户端使用。
+
+支持 `screen`、`claim`、`exec`、`input`、`result`、`interrupt`、`acknowledge`、`close`。写入异步返回请求 ID，通过 `result` 查询完成状态。终端 ID、所有者和当前 Broker 凭据在启动时固定，输入不能覆盖。关闭或 EOF 尝试释放租约；未知结果的占用不会自动清除。Broker 重启、终端重连或通道退出后需重新建立通道。
+
+此方式复用已批准的交互进程，不修改全局规则或永久放行任意远程命令。宿主若对后续输入另有强制审批，仍以宿主规则为准；不支持持久 stdin 的客户端继续使用独立 CLI 调用。审批被拒绝时，不改用其他传输绕过拒绝。任务范围之外的操作仍须取得相应授权。
+
 ## 只读查询长期允许
 
 `status`、`health`、`sessions`、`screen`、`result`、`doctor`、`detect` 只用于本机信息查询。用户可以为这些固定子命令配置持久允许规则，后续变换会话或请求 ID 时无需逐一保存规则。

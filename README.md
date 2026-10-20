@@ -9,26 +9,27 @@
 - **共用终端**：保留 SecureCRT 界面和原登录链路，支持读取屏幕、执行 POSIX shell 命令、获取输出和退出码。
 - **后台多会话**：窗口可最小化；每个标签页有独立 ID，不同标签页可以并行，同一标签页的 AI 写入串行处理。
 - **自动接入**：安装后配置登录钩子；新连接、重新连接时自动接入。本地服务可随 Windows 登录启动。
-- **常规安装界面**：自动查找路径、手动浏览目录、安装／升级／卸载切换、进度条和逐步执行日志。
+- **标准安装向导**：NSIS 提供欢迎页、目录选择、SecureCRT 配置、Skill 选择、安装进度和完成页，支持升级及标准卸载。
+- **会话内一次批准**：专用控制台入口固定目标终端，复用首次批准的进程连续收发命令，任务结束即关闭。
 - **多 Agent Skill 安装**：自动检测本机客户端，默认勾选已发现的 Agent；可多选、修改目录、添加其他客户端或全部跳过。
 - **可暂停、可恢复**：托盘控制暂停与退出，安装前备份配置，卸载按记录恢复，保留用户后续修改。
 - **自主恢复续行输入**：AI 可对自己结果未知的任务发送 Ctrl+C，读屏确认恢复后继续操作，无需默认让用户按键。
 
 ## 下载与安装
 
-在 [Releases](https://github.com/LinHuiG/securecrt-bridge/releases) 下载 `SecureCRTBridge-0.1.7-Setup.exe`。
+安装包名为 `SecureCRTBridge-0.1.9-Setup.exe`；公开发布的版本可在 [Releases](https://github.com/LinHuiG/securecrt-bridge/releases) 查看。
 
 1. 关闭 SecureCRT。
-2. 双击安装包，确认 **SecureCRT 安装目录** 和 **配置目录**。找不到时使用“浏览…”；配置目录应包含 `Sessions/Default.ini`。
-3. 确认 **安装 AI Skill** 下的客户端复选框。检测到的客户端默认勾选；“其他客户端 / 添加目录…”可选择额外的 `skills` 目录。也可取消全部或关闭总开关。
-4. 点击“开始安装 / 升级”，等待进度到 100%。
+2. 双击安装包，按“下一步”选择桥接程序的 **安装目录**，再确认 **SecureCRT 程序** 和 **配置目录**。配置目录应包含 `Sessions/Default.ini`。
+3. **安装 AI Skill** 页默认勾选已检测到的客户端，目录可修改；下一页可逐行填写额外的 Skill 子目录，或用“添加目录…”选择客户端的 `skills` 父目录。全部取消且无额外目录即跳过。
+4. 点击“安装”，查看进度和详细日志，成功后点击“完成”。
 5. 像平常一样从堡垒机连接 SSH，或打开 SecureCRT 会话。
 
 要求：**Windows x64、SecureCRT x64**。已在 SecureCRT 9.7.1 上验证。产品由 Rust 编译，安装 EXE 内置接入 DLL，无需另装 Python、Node 或 Rust。SecureCRT 本身不包含在安装包中。
 
-桥接程序安装到所选 SecureCRT 目录的 `SecureCRTBridge` 子目录；数据与备份位于 `%USERPROFILE%\AppData\Local\SecureCRTBridge`。注册与启动项属于当前 Windows 用户。安装目录需要当前用户有写权限；不会自动提升权限。
+桥接程序默认安装到 `%LOCALAPPDATA%\Programs\SecureCRTBridge`，可浏览修改；升级沿用旧版位置。数据与备份位于 `%USERPROFILE%\AppData\Local\SecureCRTBridge`。注册与启动项属于当前用户，安装目录需要当前用户有写权限，不会自动提升权限。
 
-升级时重新运行新版安装包。卸载可在同一界面选择“卸载桥接”，也可从 Windows 已安装应用进入。建议使用独立安装包卸载，避免正在运行的安装目录 EXE 被占用。原始配置备份会保留。
+升级时重新运行新版安装包。已有版本会显示升级／卸载选择页，也可从 Windows 已安装应用运行 `Uninstall.exe`。标准卸载器在临时目录执行清理，避免程序自身被占用；原始配置备份会保留。
 
 ## 使用
 
@@ -45,7 +46,9 @@ $scb = Join-Path $install.install_dir 'securecrt-bridge.exe'
 & $scb release SESSION_ID --owner my-task | Out-String
 ```
 
-GUI 子系统 EXE 在 PowerShell 中建议接 `| Out-String`，确保等待结束并收集输出。复杂命令用 `--file UTF8_FILE` 或 `--stdin`，避免多层引号转义。
+独立 CLI 调用在 PowerShell 中建议接 `| Out-String`，确保等待结束并收集输出。复杂命令用 `--file UTF8_FILE` 或 `--stdin`，避免多层引号转义。
+
+连续工作优先使用 `securecrt-session.exe SESSION_ID --owner CHAT_ID`。首次批准后保留进程，后续通过 stdin 发送 JSON 行，如 `{"op":"exec","command":"hostname","timeout":15}`，再用 `{"op":"result","request_id":"返回的ID"}` 获取结果，完成后发送 `{"op":"close"}`。此模式不要接 `Out-String`。通道固定目标与所有者，不修改全局审批规则；参见 [审批配置](docs/APPROVALS.md)。
 
 `exec` 要求终端处于空闲的 POSIX shell 提示符。命令在 `sh -c` 子 shell 中运行，不改变父 shell 的目录或环境；需要目录上下文时写成 `cd /path && ...`。交互式程序可用 `input`，但它只发送输入，不自动判断执行完成。
 
@@ -79,7 +82,7 @@ GUI 子系统 EXE 在 PowerShell 中建议接 `| Out-String`，确保等待结�
 
 `~` 表示当前 Windows 用户目录。列表及安装日志展示完整路径；选中一行后可修改目录。“其他客户端 / 添加目录…”支持多个自定义位置，选择客户端的 `skills` 父目录即可，安装器添加 `securecrt-bridge` 子目录。相同路径去重。
 
-关闭总开关或取消全部勾选会跳过 Skill。升级时，取消选择的旧 Skill 仅在仍与本程序安装内容一致时移除，用户修改会保留并记录。卸载按所有实际安装目录清理，不删除客户端本身或其他 Skill。
+取消全部勾选且清空额外目录会跳过 Skill。升级时，取消选择的旧 Skill 仅在仍与本程序安装内容一致时移除，用户修改会保留并记录。卸载按所有实际安装目录清理，不删除客户端本身或其他 Skill。
 
 不要求所有 Agent 都采用相同配置；自动检测覆盖表中客户端，其他 Agent、项目级安装或自定义加载规则需手动选择路径。各客户端仍需启用本地 Skill 加载并允许本地命令工具，目录安装不代表已验证每个客户端的运行兼容性。参见 [客户端目录依据](docs/AGENT_SKILLS.md)。
 
@@ -139,9 +142,10 @@ assets/skill    AI 使用说明
 ```powershell
 .\build.ps1 test
 .\build.ps1 release
+.\package.ps1 -NsisPath 'C:\Tools\NSIS\makensis.exe'
 ```
 
-先构建 DLL，再把 DLL 内嵌进 EXE，产物为 `target/release/securecrt-bridge.exe`。使用锁定依赖；已有缓存可加 `-Offline`。MSVC 和 GNU 配置均静态链接 CRT。
+先构建 DLL 和会话控制台，再内嵌进桥接 EXE；`package.ps1` 使用现有 NSIS 3 编译器生成 `dist/SecureCRTBridge-版本-Setup.exe`。可复用其他项目（如 shishi）的编译器，无需重复安装。使用锁定依赖；已有缓存可加 `-Offline`。MSVC 和 GNU 均静态链接 CRT。
 
 GNU 工具链需要 MinGW 的 `windres`、`dlltool`、`as` 与链接器。非标准路径可传 `-ToolchainRoot <Rust工具链目录> -BinutilsDirectory <MinGW的bin目录>`。这些工具仅用于开发，不是用户运行依赖。
 
@@ -149,4 +153,4 @@ GNU 工具链需要 MinGW 的 `windres`、`dlltool`、`as` 与链接器。非标
 
 ## 许可
 
-[MIT](LICENSE)。本项目与 VanDyke Software、齐治均无隶属关系，不分发 SecureCRT 或堡垒机客户端。依赖说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+Copyright (c) 2026 LinHuiG。本项目采用 [GNU Affero General Public License v3.0（AGPL-3.0-only）](LICENSE) 开源协议。本项目与 VanDyke Software、齐治均无隶属关系，不分发 SecureCRT 或堡垒机客户端。依赖说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

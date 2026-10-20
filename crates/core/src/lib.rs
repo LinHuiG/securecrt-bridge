@@ -1,4 +1,5 @@
 pub mod broker;
+pub mod channel;
 pub mod config;
 pub mod http;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

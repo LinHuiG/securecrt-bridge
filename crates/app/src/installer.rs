@@ -356,14 +356,28 @@ fn sync_skills(
     }
     Ok(())
 }
+fn registration_matches(current: Option<&str>, old: &RegChange) -> bool {
+    // A removed application-owned value is repairable. Read failures are errors,
+    // never absence; a different existing value still requires explicit resolution.
+    current.is_none() || current == Some(&old.after) || current == old.before.as_deref()
+}
+fn registry_preflight(j: &Journal) -> Result<()> {
+    for old in &j.registry {
+        let current = platform::reg_get_checked(HKEY_CURRENT_USER, &old.key, &old.name)?;
+        if !registration_matches(current.as_deref(), old) {
+            bail!("桥接注册项已有其他内容，请先核对：{} {}", old.key, old.name);
+        }
+    }
+    Ok(())
+}
 fn set_reg(j: &mut Journal, key: &str, name: &str, value: &str) -> Result<()> {
     if let Some(old) = j
         .registry
         .iter_mut()
         .find(|r| r.key == key && r.name == name)
     {
-        let current = platform::reg_get(HKEY_CURRENT_USER, key, name);
-        if current.as_deref() != Some(&old.after) && current != old.before {
+        let current = platform::reg_get_checked(HKEY_CURRENT_USER, key, name)?;
+        if !registration_matches(current.as_deref(), old) {
             bail!("Registry value changed outside Bridge: {key} {name}");
         }
         old.after = value.into();
@@ -371,7 +385,7 @@ fn set_reg(j: &mut Journal, key: &str, name: &str, value: &str) -> Result<()> {
         j.registry.push(RegChange {
             key: key.into(),
             name: name.into(),
-            before: platform::reg_get(HKEY_CURRENT_USER, key, name),
+            before: platform::reg_get_checked(HKEY_CURRENT_USER, key, name)?,
             after: value.into(),
         });
     }
@@ -477,22 +491,53 @@ fn hook(j: &mut Journal, file: &Path, install: &Installation) -> Result<()> {
 pub fn install(args: &[String], repair: bool) -> Result<Value> {
     install_with_progress(args, repair, &|_, _| {})
 }
+pub fn validate(args: &[String]) -> Result<()> {
+    let c = resolve(args, false)?;
+    if !platform::securecrt_processes()?.is_empty() {
+        bail!("请先关闭 SecureCRT，再继续安装。安装器不会关闭现有 SSH 会话。");
+    }
+    let old = Installation::load().ok();
+    let dir = option(args, "--install-dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::setup::default_directory(old.as_ref()));
+    crate::setup::validate_directory(&dir)?;
+    crate::setup::validate_uninstaller(args)?;
+    if let Some(old) = old.as_ref() {
+        if !same_path(&old.install_dir, &dir)
+            || !same_path(&old.config_dir, &c.config)
+            || !same_path(&old.securecrt_exe, &c.executable)
+        {
+            bail!("升级须沿用原安装目录和 SecureCRT 配置；更换位置请先卸载旧版。");
+        }
+    }
+    let mut paths = skills::selected(args, old.as_ref())?;
+    let journal = if journal_path().exists() {
+        scb_core::load_json(&journal_path())?
+    } else {
+        Journal::default()
+    };
+    registry_preflight(&journal)?;
+    skill_preflight(&journal, &mut paths)
+}
 pub fn install_with_progress(
     args: &[String],
     repair: bool,
     progress: &dyn Fn(u32, &str),
 ) -> Result<Value> {
     progress(0, "检查安装包、路径和 SecureCRT 状态");
-    if crate::ENGINE.is_empty() {
+    if crate::ENGINE.is_empty() || crate::SESSION.is_empty() {
         bail!("Development binary has no bundled engine; run build.ps1 release");
     }
     let mut c = resolve(args, repair)?;
     if !platform::securecrt_processes()?.is_empty() {
         bail!("请先关闭 SecureCRT（避免它退出时覆盖登录配置），再运行安装器。现有 SSH 会话没有被关闭或修改。");
     }
-    let root = c.launcher.parent().context("Invalid install path")?;
-    let mut dir = root.join("SecureCRTBridge");
     let previous_install = Installation::load().ok();
+    let mut dir = option(args, "--install-dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::setup::default_directory(previous_install.as_ref()));
+    crate::setup::validate_directory(&dir)?;
+    crate::setup::validate_uninstaller(args)?;
     let mut skill_dirs = skills::selected(args, previous_install.as_ref())?;
     let mut j: Journal = if journal_path().exists() {
         scb_core::load_json(&journal_path())?
@@ -500,8 +545,12 @@ pub fn install_with_progress(
         Journal::default()
     };
     skill_preflight(&j, &mut skill_dirs)?;
+    registry_preflight(&j)?;
     if let Some(old) = previous_install.as_ref() {
-        if !same_path(&old.install_dir, &dir) || !same_path(&old.config_dir, &c.config) {
+        if !same_path(&old.install_dir, &dir)
+            || !same_path(&old.config_dir, &c.config)
+            || !same_path(&old.securecrt_exe, &c.executable)
+        {
             bail!("A different SecureCRT installation or configuration is registered. Uninstall it before changing installation location.");
         }
         // Windows discovery may return different casing. Keep recorded spellings
@@ -552,6 +601,10 @@ pub fn install_with_progress(
     let exe = std::env::current_exe()?;
     let bytes = std::fs::read(&exe)?;
     write_owned(&mut j, &dir.join("securecrt-bridge.exe"), &bytes)?;
+    write_owned(&mut j, &dir.join("securecrt-session.exe"), crate::SESSION)?;
+    if let Some(path) = option(args, "--external-uninstaller") {
+        write_owned(&mut j, &dir.join("Uninstall.exe"), &std::fs::read(path)?)?;
+    }
     progress(43, "本地服务和命令行程序已写入");
     let previous_skills = previous_install
         .as_ref()
@@ -651,7 +704,11 @@ pub fn install_with_progress(
         ("InstallLocation", dir.to_string_lossy().to_string()),
         (
             "UninstallString",
-            format!("\"{}\" uninstall --gui", exe.display()),
+            if dir.join("Uninstall.exe").exists() {
+                format!("\"{}\"", dir.join("Uninstall.exe").display())
+            } else {
+                format!("\"{}\" uninstall --gui", exe.display())
+            },
         ),
     ] {
         set_reg(&mut j, uninst, name, &value)?;
@@ -684,6 +741,11 @@ pub fn uninstall(args: &[String]) -> Result<Value> {
 pub fn uninstall_with_progress(args: &[String], progress: &dyn Fn(u32, &str)) -> Result<Value> {
     progress(0, "检查已安装版本和 SecureCRT 状态");
     let install = Installation::load()?;
+    if let Some(expected) = option(args, "--expect-dir") {
+        if !same_path(&install.install_dir, Path::new(expected)) {
+            bail!("当前安装位置与此卸载程序不匹配，未进行卸载。");
+        }
+    }
     if !platform::securecrt_processes()?.is_empty() {
         bail!("请先关闭 SecureCRT，再卸载桥接模块。");
     }
@@ -703,7 +765,7 @@ pub fn uninstall_with_progress(args: &[String], progress: &dyn Fn(u32, &str)) ->
     }
     progress(45, "正在移除接入注册、启动项和卸载信息");
     for r in j.registry.iter().rev() {
-        let current = platform::reg_get(HKEY_CURRENT_USER, &r.key, &r.name);
+        let current = platform::reg_get_checked(HKEY_CURRENT_USER, &r.key, &r.name)?;
         if current.as_deref() == Some(&r.after) {
             platform::reg_set(&r.key, &r.name, r.before.as_deref())?;
         } else if current != r.before {
@@ -756,6 +818,19 @@ pub fn uninstall_with_progress(args: &[String], progress: &dyn Fn(u32, &str)) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn missing_owned_registration_can_be_repaired_but_foreign_values_cannot() {
+        let old = RegChange {
+            key: "fixture".into(),
+            name: "".into(),
+            before: Some("original".into()),
+            after: "bridge".into(),
+        };
+        assert!(registration_matches(None, &old));
+        assert!(registration_matches(Some("bridge"), &old));
+        assert!(registration_matches(Some("original"), &old));
+        assert!(!registration_matches(Some("user change"), &old));
+    }
     #[test]
     fn multi_skill_install_upgrade_skip_and_preserve_edits() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

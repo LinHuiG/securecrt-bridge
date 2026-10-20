@@ -49,10 +49,13 @@ pub fn choose_file(title: &str, filename: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(String::from_utf16(&buffer[..n])?))
 }
 pub fn reg_get(root: HKEY, key: &str, name: &str) -> Option<String> {
+    reg_get_checked(root, key, name).ok().flatten()
+}
+pub fn reg_get_checked(root: HKEY, key: &str, name: &str) -> Result<Option<String>> {
     unsafe {
         let mut data = vec![0u16; 32768];
         let mut size = (data.len() * 2) as u32;
-        RegGetValueW(
+        let status = RegGetValueW(
             root,
             PCWSTR(w(key).as_ptr()),
             PCWSTR(w(name).as_ptr()),
@@ -60,11 +63,15 @@ pub fn reg_get(root: HKEY, key: &str, name: &str) -> Option<String> {
             None,
             Some(data.as_mut_ptr().cast()),
             Some(&mut size),
-        )
-        .ok()
-        .ok()?;
+        );
+        if status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND {
+            return Ok(None);
+        }
+        status
+            .ok()
+            .with_context(|| format!("无法读取注册表：{key} {name}"))?;
         let n = (size as usize / 2).saturating_sub(1);
-        String::from_utf16(&data[..n]).ok()
+        Ok(Some(String::from_utf16(&data[..n])?))
     }
 }
 pub fn reg_set(key: &str, name: &str, value: Option<&str>) -> Result<()> {
